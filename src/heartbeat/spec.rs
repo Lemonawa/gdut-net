@@ -122,7 +122,7 @@ pub fn ka1_pkt2(cnt: u8, first: bool, host_ip: HostIp, seed: Seed, flag: Flag) -
 /// KA2 校验和：报文按 16 位小端字全包 XOR → `&0xffff` → `*0x2c7` → 32 位小端写出。
 pub fn ka2_checksum(pkt: &[u8; KA2_LEN]) -> [u8; 4] {
     let mut sum: u16 = 0;
-    for chunk in pkt.chunks_exact(2) {
+    for chunk in pkt.as_chunks::<2>().0 {
         sum ^= u16::from_le_bytes([chunk[0], chunk[1]]);
     }
     let v = u32::from(sum).wrapping_mul(0x2c7);
