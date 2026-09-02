@@ -6,7 +6,7 @@
 //!
 //! 线程模型：所有 MenuItem 操作（含 set_text）都在主泵线程完成——
 //! muda 的 MenuItem 内含 Rc，不可跨线程。后台 IPC 线程只经 std mpsc
-//! 发送"应显示的状态文本"，泵线程每拍取来应用到菜单项。
+//! 发送"status text to display"，泵线程每拍取来应用到菜单项。
 //!
 //! PipeClient 的 async 方法由每次调用自建的极小 current_thread runtime
 //! 驱动——托盘线程没有全局 tokio executor，不能假设 runtime 存在。
@@ -85,7 +85,10 @@ fn register_aumid() {
         )
     };
     if ret != ERROR_SUCCESS {
-        log::warn!("注册 AUMID 失败（toast 可能不显示）: 错误码 {}", ret.0);
+        log::warn!(
+            "Failed to register AUMID (toast may not show): error {}",
+            ret.0
+        );
         return;
     }
     // 默认值（值名为 null 的 REG_SZ）即通知中心显示的来源名。
@@ -95,7 +98,7 @@ fn register_aumid() {
     let ret = unsafe { RegSetValueExW(hkey, PCWSTR::null(), None, REG_SZ, Some(&bytes)) };
     let closed = unsafe { RegCloseKey(hkey) };
     if ret != ERROR_SUCCESS || closed != ERROR_SUCCESS {
-        log::warn!("写入 AUMID DisplayName 失败: 错误码 {}", ret.0);
+        log::warn!("Failed to write AUMID DisplayName: error {}", ret.0);
     }
 }
 
@@ -106,25 +109,26 @@ pub fn run_tray() -> Result<()> {
     let snapshot: SharedSnapshot = Arc::new(Mutex::new(None));
 
     // 菜单在主线程创建；后台线程只经通道送状态文本。
-    let status_item = MenuItem::new("状态: 未连接", false, None);
-    let redial_item = MenuItem::new("立即重拨", true, None);
-    let panel_item = MenuItem::new("详情面板", true, None);
-    let quit_item = MenuItem::new("退出", true, None);
+    let status_item = MenuItem::new("Status: Disconnected", false, None);
+    let redial_item = MenuItem::new("Redial now", true, None);
+    let panel_item = MenuItem::new("Details", true, None);
+    let quit_item = MenuItem::new("Exit", true, None);
 
     let menu = Menu::new();
     menu.append_items(&[&status_item, &redial_item, &panel_item, &quit_item])
-        .context("构建托盘菜单失败")?;
+        .context("Failed to build tray menu")?;
 
     // tray-icon 要求：创建图标与跑事件循环必须在同一线程（Windows 上是
     // win32 消息循环），主线程天然满足。
-    let icon = tray_icon::Icon::from_rgba(tray_icon_rgba(), 32, 32).context("构建托盘图标失败")?;
+    let icon = tray_icon::Icon::from_rgba(tray_icon_rgba(), 32, 32)
+        .context("Failed to build tray icon")?;
     let _tray = tray_icon::TrayIconBuilder::new()
-        .with_tooltip("gdut-net — 广工有线网客户端")
+        .with_tooltip("gdut-net — GDUT Wired Client")
         .with_icon(icon)
         .with_menu(Box::new(menu))
         .with_menu_on_left_click(true)
         .build()
-        .map_err(|e| anyhow!("创建托盘图标失败: {e}"))?;
+        .map_err(|e| anyhow!("Failed to create tray icon: {e}"))?;
 
     // IPC 线程 → 泵线程：状态文本；面板点击重拨也汇聚到泵线程统一发，
     // 避免两处并发建 PipeClient。
@@ -136,14 +140,14 @@ pub fn run_tray() -> Result<()> {
         std::thread::Builder::new()
             .name("gdut-net-tray-ipc".into())
             .spawn(move || ipc_loop(snapshot, status_tx))
-            .context("启动托盘 IPC 线程失败")?;
+            .context("Failed to start tray IPC thread")?;
     }
 
     let menu_rx = MenuEvent::receiver();
     let status_text = |state: Option<&StateSnapshot>| match state {
-        None => "状态: 未连接".to_string(),
+        None => "Status: Disconnected".to_string(),
         Some(s) => format!(
-            "状态: {}{}",
+            "Status: {}{}",
             s.status_text(),
             s.ip.as_deref()
                 .map(|ip| format!(" · IP {ip}"))
@@ -202,7 +206,7 @@ fn send_redial() {
             })
         });
     if let Err(e) = result {
-        log::warn!("发送重拨命令失败: {e:#}");
+        log::warn!("Failed to send redial command: {e:#}");
     }
 }
 
@@ -211,9 +215,9 @@ fn send_redial() {
 fn ipc_loop(snapshot: SharedSnapshot, status_tx: mpsc::Sender<String>) {
     let push_text = |snapshot: &SharedSnapshot| {
         let text = snapshot.lock().ok().map(|g| match g.as_ref() {
-            None => "状态: 未连接".to_string(),
+            None => "Status: Disconnected".to_string(),
             Some(s) => format!(
-                "状态: {}{}",
+                "Status: {}{}",
                 s.status_text(),
                 s.ip.as_deref()
                     .map(|ip| format!(" · IP {ip}"))
@@ -229,7 +233,7 @@ fn ipc_loop(snapshot: SharedSnapshot, status_tx: mpsc::Sender<String>) {
         let mut client = match PipeClient::connect() {
             Ok(c) => c,
             Err(e) => {
-                log::debug!("托盘连接服务失败（稍后重试）: {e:#}");
+                log::debug!("Tray failed to connect to service (retrying): {e:#}");
                 std::thread::sleep(CONNECT_RETRY);
                 continue;
             }
@@ -239,7 +243,7 @@ fn ipc_loop(snapshot: SharedSnapshot, status_tx: mpsc::Sender<String>) {
             let state = match block_on_next_state(&mut client) {
                 Ok(s) => s,
                 Err(e) => {
-                    log::debug!("托盘状态流断开（服务已停止？）: {e:#}");
+                    log::debug!("Tray status stream disconnected (service stopped?): {e:#}");
                     break;
                 }
             };
@@ -250,8 +254,8 @@ fn ipc_loop(snapshot: SharedSnapshot, status_tx: mpsc::Sender<String>) {
         }
 
         // 服务断开：通知用户、清缓存与文本，回到重试连接循环。
-        if let Err(e) = crate::notify::toast("gdut-net", "gdut-net 服务已停止") {
-            log::warn!("服务停止 toast 失败: {e}");
+        if let Err(e) = crate::notify::toast("gdut-net", "gdut-net service stopped") {
+            log::warn!("Failed to toast service stopped: {e}");
         }
         if let Ok(mut guard) = snapshot.lock() {
             *guard = None;
@@ -266,7 +270,7 @@ fn ipc_loop(snapshot: SharedSnapshot, status_tx: mpsc::Sender<String>) {
 fn block_on_next_state(client: &mut PipeClient) -> Result<StateSnapshot> {
     tokio::runtime::Builder::new_current_thread()
         .build()
-        .context("创建托盘 runtime 失败")?
+        .context("Failed to create tray runtime")?
         .block_on(client.next_state())
 }
 
@@ -305,7 +309,10 @@ fn pump_once(timeout: Option<Duration>) -> Result<bool> {
             // 0 = WM_QUIT，-1 = 错误；托盘场景两者都应终止泵。
             let ret = unsafe { GetMessageW(&mut msg, None, 0, 0) };
             if ret.0 <= 0 {
-                return Err(anyhow!("win32 消息泵退出（GetMessageW = {}）", ret.0));
+                return Err(anyhow!(
+                    "Win32 message pump exited (GetMessageW = {})",
+                    ret.0
+                ));
             }
             unsafe {
                 let _ = TranslateMessage(&msg);

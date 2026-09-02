@@ -127,7 +127,7 @@ mod win {
             };
         }
         if ret != 0 {
-            return Err(anyhow!("GetAdaptersAddresses 失败: 错误码 {ret}"));
+            return Err(anyhow!("GetAdaptersAddresses failed: error {ret}"));
         }
 
         let mut out = Vec::new();
@@ -168,7 +168,7 @@ mod win {
         candidates
             .into_iter()
             .next()
-            .ok_or_else(|| anyhow!("未找到可用的物理以太网适配器"))
+            .ok_or_else(|| anyhow!("No usable physical Ethernet adapter found"))
     }
 
     /// PPPoE 会话适配器（IF_TYPE_PPP）的 IPv4。
@@ -223,7 +223,7 @@ mod tests {
             "VMware Virtual Ethernet",
             "VirtualBox Host-Only",
         ] {
-            assert!(is_virtual(name), "{name} 应判虚拟");
+            assert!(is_virtual(name), "{name} should be flagged as virtual");
         }
     }
 
@@ -232,9 +232,9 @@ mod tests {
         for name in [
             "Realtek Gaming GbE",
             "Intel(R) Ethernet Connection",
-            "以太网",
+            "Ethernet",
         ] {
-            assert!(!is_virtual(name), "{name} 不应误判");
+            assert!(!is_virtual(name), "{name} should not be flagged as virtual");
         }
     }
 }

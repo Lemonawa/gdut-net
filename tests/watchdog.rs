@@ -144,7 +144,10 @@ async fn request_redial_in_connected_hangups_live_session_first() {
     wd.run_once().await;
     // 语义修正：活会话必须先挂断再拨，否则二次 RasDial 失败入 Backoff 死循环
     assert_eq!(wd.snapshot().status, SessionStatus::Connected);
-    assert_eq!(wd.snapshot().last_drop_reason.as_deref(), Some("手动重拨"));
+    assert_eq!(
+        wd.snapshot().last_drop_reason.as_deref(),
+        Some("Manual redial")
+    );
     // do_dial 成功后 since 重置为新会话起点（record_drop 清理 → 成功再赋值）
     assert!(wd.snapshot().since_unix.is_some());
 }

@@ -86,14 +86,14 @@ mod win {
             .map_err(|e| DialError {
                 kind: ras::ErrKind::Transient,
                 code: 0,
-                msg: format!("拨号任务 join 失败: {e}"),
+                msg: format!("Dial task join failed: {e}"),
             })
             .and_then(|r| match r {
                 Ok(s) => Ok(s),
                 Err(ras::RasError::Auth) => Err(DialError {
                     kind: ras::ErrKind::Auth,
                     code: 691,
-                    msg: "认证失败(691)：学号或密码错误".to_string(),
+                    msg: "Authentication failed (691): invalid student ID or password".to_string(),
                 }),
                 Err(ras::RasError::Other { code, msg }) => Err(DialError {
                     kind: ras::ErrKind::Transient,
@@ -113,7 +113,7 @@ mod win {
         async fn hangup(&mut self) {
             if let Some(s) = self.session.take() {
                 if let Err(e) = s.0.hangup() {
-                    log::warn!("挂断失败（忽略）: {e:#}");
+                    log::warn!("Hangup failed (ignored): {e:#}");
                 }
             }
         }
@@ -148,7 +148,7 @@ mod win {
                 Ok(physical)
             } else {
                 bail!(
-                    "配置 dial.interface={:?} 与当前物理适配器 {:?} 不匹配",
+                    "Config dial.interface={:?} does not match current physical adapter {:?}",
                     self.interface,
                     physical.name
                 )
@@ -162,7 +162,7 @@ mod win {
             match self.resolve_adapter() {
                 Ok(a) => probe_once(a.ipv4, a.gateway, &self.http_url).await,
                 Err(e) => {
-                    log::warn!("探测前解析适配器失败: {e:#}");
+                    log::warn!("Failed to resolve adapter before probe: {e:#}");
                     crate::probe::ProbeVerdict::LinkDown
                 }
             }
@@ -189,13 +189,13 @@ mod win {
                     return;
                 }
             }
-            log::info!("Toast 通知 [{key}]: {title} — {body}");
+            log::info!("Toast [{key}]: {title} — {body}");
             match notify::toast(title, body) {
                 Ok(()) => {
                     self.last.insert(key.to_string(), Instant::now());
                 }
                 Err(e) => {
-                    log::warn!("Toast 通知失败（忽略）: {e:#}");
+                    log::warn!("Toast failed (ignored): {e:#}");
                 }
             }
         }
@@ -206,7 +206,7 @@ mod win {
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
             .build()
-            .context("创建 tokio runtime 失败")?;
+            .context("Failed to create tokio runtime")?;
         let result = runtime.block_on(run(cfg, stop));
         // blocking 任务已由 hb_stop 保证退出；兜底防万一（如 recv 卡死在驱动层）。
         runtime.shutdown_timeout(Duration::from_secs(10));
@@ -216,7 +216,7 @@ mod win {
     async fn run(cfg: Config, stop: CancellationToken) -> Result<()> {
         // 密码运行时解密一次；失败 bail（重输密码场景由 install 负责）。
         let pass = crypto::unprotect(&cfg.account.password_blob)
-            .context("解密 password_blob 失败（请重新运行 install 输入密码）")?;
+            .context("Failed to decrypt password_blob (re-run install to enter password)")?;
 
         // 心跳先行装配（不阻塞拨号）：bind 失败只影响兼容模式，不上抛。
         // 装配循环重试：适配器/网络未就绪时每 60s 自愈；停止后由 runtime
@@ -224,7 +224,10 @@ mod win {
         let (hb_tx, mut hb_rx) = watch::channel(HeartbeatStatus::Off);
         if cfg.heartbeat.enabled {
             let server: Ipv4Addr = cfg.heartbeat.server.parse().with_context(|| {
-                format!("heartbeat.server 解析失败: {:?}", cfg.heartbeat.server)
+                format!(
+                    "Failed to parse heartbeat.server: {:?}",
+                    cfg.heartbeat.server
+                )
             })?;
             let port = cfg.heartbeat.port;
             let interval = Duration::from_secs(cfg.heartbeat.interval_secs);
@@ -243,7 +246,7 @@ mod win {
                         move || match adapter::physical_adapter() {
                             Ok(a) => {
                                 log::info!(
-                                    "心跳启动：server={server}:{port} src={}(物理 {})",
+                                    "Heartbeat starting: server={server}:{port} src={} (physical {})",
                                     a.ipv4,
                                     a.name
                                 );
@@ -253,20 +256,20 @@ mod win {
                                     server, port, a.ipv4, interval, hb_stop, hb_tx,
                                 )
                             }
-                            Err(e) => Err(format!("心跳找不到物理适配器: {e:#}")),
+                            Err(e) => Err(format!("Heartbeat: physical adapter not found: {e:#}")),
                         }
                     })
                     .await;
                     match attempt {
-                        Ok(Ok(())) => log::info!("心跳会话正常结束"),
+                        Ok(Ok(())) => log::info!("Heartbeat session ended normally"),
                         Ok(Err(e)) => {
-                            log::warn!("心跳会话退出（60s 后重试装配）: {e}");
+                            log::warn!("Heartbeat session exited (retry in 60s): {e}");
                             let _ = hb_tx.send(HeartbeatStatus::Error(e));
                         }
                         Err(e) => {
-                            log::warn!("心跳装配任务 join 失败（60s 后重试）: {e}");
-                            let _ =
-                                hb_tx.send(HeartbeatStatus::Error(format!("心跳任务异常: {e}")));
+                            log::warn!("Heartbeat task join failed (retry in 60s): {e}");
+                            let _ = hb_tx
+                                .send(HeartbeatStatus::Error(format!("Heartbeat task error: {e}")));
                         }
                     }
                     tokio::select! {
@@ -311,7 +314,7 @@ mod win {
                 maybe_cmd = cmd_rx.recv() => {
                     match maybe_cmd {
                         Some(Command::Redial) => {
-                            log::info!("IPC 命令：手动重拨");
+                            log::info!("IPC command: manual redial");
                             // 置一次性标志即返回（下一轮 run_once 顶部立即
                             // 消费）；当前 sleep 已被本分支胜出打断，不会
                             // 睡满退避时长。
@@ -329,8 +332,8 @@ mod win {
                         if let HeartbeatStatus::Error(e) = hb_rx.borrow().clone() {
                             notifier.fire(
                                 "heartbeat_error",
-                                "gdut-net 心跳异常",
-                                &format!("兼容模式心跳出错：{e}"),
+                                "gdut-net heartbeat error",
+                                &format!("Compatibility heartbeat error: {e}"),
                             );
                             let mut snap: StateSnapshot = watchdog.snapshot();
                             snap.ip = adapter::ppp_adapter_ip().map(|ip| ip.to_string());
@@ -356,21 +359,21 @@ mod win {
                 if since.elapsed() >= REDIAL_FAILING_TOAST_AFTER {
                     notifier.fire(
                         "redial_failing",
-                        "gdut-net 网络异常",
+                        "gdut-net network error",
                         &format!(
-                            "已连续重拨失败 {} 分钟（{} 次），请检查网络或账号",
+                            "Redial failed for {} minutes ({} attempts), check network or credentials",
                             since.elapsed().as_secs() / 60,
                             snap.redial_attempts
                         ),
                     );
                 }
             } else if snap.status == SessionStatus::Connected && failing_since.take().is_some() {
-                log::info!("重拨成功，会话恢复");
+                log::info!("Redial succeeded, session restored");
             }
             next_delay = d;
         }
 
-        log::info!("收到停止信号，挂断会话退出");
+        log::info!("Stop signal received, hanging up and exiting");
         watchdog.shutdown().await;
         Ok(())
     }

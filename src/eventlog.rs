@@ -32,7 +32,7 @@ mod win {
     }
 
     fn win32_err(step: &str, code: windows::Win32::Foundation::WIN32_ERROR) -> anyhow::Error {
-        anyhow::anyhow!("{step} 失败: 错误码 {}", code.0)
+        anyhow::anyhow!("{step} failed: error {}", code.0)
     }
 
     /// 打开已存在的源键（KEY_SET_VALUE）；不存在报错由调用方处理。
@@ -92,10 +92,10 @@ mod win {
         };
         close_key(hkey).ok();
         if ret_msg != ERROR_SUCCESS {
-            return Err(win32_err("写入 EventMessageFile", ret_msg));
+            return Err(win32_err("Write EventMessageFile", ret_msg));
         }
         if ret_types != ERROR_SUCCESS {
-            return Err(win32_err("写入 TypesSupported", ret_types));
+            return Err(win32_err("Write TypesSupported", ret_types));
         }
         Ok(())
     }
@@ -136,7 +136,7 @@ mod win {
         pub fn open() -> Result<Self> {
             let handle =
                 unsafe { RegisterEventSourceW(PCWSTR::null(), pw(&wide(EVENT_SOURCE_NAME))) }
-                    .context("RegisterEventSourceW 失败")?;
+                    .context("RegisterEventSourceW failed")?;
             Ok(EventLog { handle })
         }
 
@@ -156,7 +156,7 @@ mod win {
                     None,
                 )
             }
-            .context("ReportEventW 失败")
+            .context("ReportEventW failed")
         }
     }
 
@@ -168,7 +168,8 @@ mod win {
 
     /// 确保目录存在（service_main 初始化日志目录用）。
     pub fn ensure_dir(path: &Path) -> Result<()> {
-        std::fs::create_dir_all(path).with_context(|| format!("创建目录失败: {}", path.display()))
+        std::fs::create_dir_all(path)
+            .with_context(|| format!("Failed to create directory: {}", path.display()))
     }
 }
 

@@ -26,7 +26,7 @@ const KA1_TO_KA2_DELAY: Duration = Duration::from_secs(3);
 /// 连续 recv 超时容忍次数，超过则重置本轮（cnt 不重置）。
 const RECV_TIMEOUT_LIMIT: u8 = 5;
 /// 绑定失败提示（端口 61440 被官方客户端占用）。
-const BIND_ERR_MSG: &str = "61440 被占用，兼容模式不可用";
+const BIND_ERR_MSG: &str = "Port 61440 in use, compatibility mode unavailable";
 
 /// 单轮 KA 交换内的一次 recv，带超时。
 /// 连续 [`RECV_TIMEOUT_LIMIT`] 次超时后放弃（返回 None）；收到数据立即返回。
@@ -43,15 +43,15 @@ fn recv_retry(sock: &UdpSocket, stop: &CancellationToken) -> Option<Vec<u8>> {
                 if e.kind() == std::io::ErrorKind::WouldBlock
                     || e.kind() == std::io::ErrorKind::TimedOut =>
             {
-                log::debug!("心跳 recv 超时（{i}/{RECV_TIMEOUT_LIMIT}）");
+                log::debug!("Heartbeat recv timeout ({i}/{RECV_TIMEOUT_LIMIT})");
             }
             Err(e) => {
-                log::warn!("心跳 recv 失败: {e}");
+                log::warn!("Heartbeat recv failed: {e}");
                 return None;
             }
         }
     }
-    log::warn!("心跳：连续 {RECV_TIMEOUT_LIMIT} 次 recv 超时，重置本轮");
+    log::warn!("Heartbeat: {RECV_TIMEOUT_LIMIT} consecutive recv timeouts, resetting round");
     None
 }
 
@@ -77,7 +77,7 @@ pub fn run_blocking(
     let sock = match sock {
         Ok(s) => s,
         Err(msg) => {
-            log::error!("心跳：{msg}");
+            log::error!("Heartbeat: {msg}");
             let _ = status_tx.send(HeartbeatStatus::Error(BIND_ERR_MSG.to_string()));
             return Err(msg);
         }
@@ -85,14 +85,14 @@ pub fn run_blocking(
     let _ = status_tx.send(HeartbeatStatus::Running);
     let peer = SocketAddr::from((server, port));
     if let Err(e) = sock.connect(peer) {
-        let msg = format!("connect {peer} 失败: {e}");
-        log::error!("心跳：{msg}");
+        let msg = format!("connect {peer} failed: {e}");
+        log::error!("Heartbeat: {msg}");
         let _ = status_tx.send(HeartbeatStatus::Error(msg.clone()));
         return Err(msg);
     }
     if let Err(e) = sock.set_read_timeout(Some(RECV_TIMEOUT)) {
-        let msg = format!("设置 recv 超时失败: {e}");
-        log::error!("心跳：{msg}");
+        let msg = format!("Failed to set recv timeout: {e}");
+        log::error!("Heartbeat: {msg}");
         let _ = status_tx.send(HeartbeatStatus::Error(msg.clone()));
         return Err(msg);
     }
@@ -104,14 +104,14 @@ pub fn run_blocking(
 
     loop {
         if stop.is_cancelled() {
-            log::info!("心跳：收到停止信号，退出会话循环");
+            log::info!("Heartbeat: stop signal received, exiting session loop");
             return Ok(());
         }
         // ---- KA1：探测 + 握手（学 seed / host_ip / 可选 flag）----
         let pkt1 = spec::ka1_pkt1(ka1_cnt);
         if let Err(e) = sock.send(&pkt1) {
-            let msg = format!("ka1_pkt1 发送失败: {e}");
-            log::error!("心跳：{msg}");
+            let msg = format!("ka1_pkt1 send failed: {e}");
+            log::error!("Heartbeat: {msg}");
             let _ = status_tx.send(HeartbeatStatus::Error(msg.clone()));
             return Err(msg);
         }
@@ -119,12 +119,15 @@ pub fn run_blocking(
             Some(resp) => match spec::parse_ka1_resp(&resp) {
                 Some(init) => init,
                 None => {
-                    log::warn!("心跳：ka1 响应无法解析（{} 字节），重置本轮", resp.len());
+                    log::warn!(
+                        "Heartbeat: failed to parse ka1 response ({} bytes), resetting round",
+                        resp.len()
+                    );
                     continue;
                 }
             },
             None => {
-                log::warn!("心跳：ka1_pkt1 响应超时，重置本轮");
+                log::warn!("Heartbeat: ka1_pkt1 response timeout, resetting round");
                 continue;
             }
         };
@@ -134,8 +137,8 @@ pub fn run_blocking(
             ka1_flag = f;
         }
         if let Err(e) = sock.send(&spec::ka1_pkt2(ka1_cnt, true, host_ip, seed, ka1_flag)) {
-            let msg = format!("ka1_pkt2 发送失败: {e}");
-            log::error!("心跳：{msg}");
+            let msg = format!("ka1_pkt2 send failed: {e}");
+            log::error!("Heartbeat: {msg}");
             let _ = status_tx.send(HeartbeatStatus::Error(msg.clone()));
             return Err(msg);
         }
@@ -144,21 +147,21 @@ pub fn run_blocking(
 
         // ---- KA2：密钥交换 + 确认 ----
         if !sleep_interruptible(KA1_TO_KA2_DELAY, &stop) {
-            log::info!("心跳：停止信号，退出会话循环");
+            log::info!("Heartbeat: stop signal, exiting session loop");
             return Ok(());
         }
         let mut key: Key = [0u8; 4];
         let rand_num = new_rand();
         if let Err(e) = sock.send(&spec::ka2_pkt1(ka2_cnt, ka2_flag, rand_num, key)) {
-            let msg = format!("ka2_pkt1 发送失败: {e}");
-            log::error!("心跳：{msg}");
+            let msg = format!("ka2_pkt1 send failed: {e}");
+            log::error!("Heartbeat: {msg}");
             let _ = status_tx.send(HeartbeatStatus::Error(msg.clone()));
             return Err(msg);
         }
         let resp = match recv_retry(&sock, &stop) {
             Some(r) => r,
             None => {
-                log::warn!("心跳：ka2_pkt1 无响应，重置本轮");
+                log::warn!("Heartbeat: ka2_pkt1 no response, resetting round");
                 continue;
             }
         };
@@ -167,24 +170,27 @@ pub fn run_blocking(
             match spec::parse_ka2_resp(&resp).and_then(|r| r.flag) {
                 Some(f) => {
                     ka2_flag = f;
-                    log::info!("心跳：ka2 收到文件报文，学习 flag={:02x?} 后重发", ka2_flag);
+                    log::info!(
+                        "Heartbeat: received file packet, learned flag={:02x?}, resending",
+                        ka2_flag
+                    );
                 }
                 None => log::warn!(
-                    "心跳：文件报文缺 flag 字段（{} 字节），沿用旧 flag",
+                    "Heartbeat: file packet missing flag field ({} bytes), keeping old flag",
                     resp.len()
                 ),
             }
             let rand_num = new_rand();
             if let Err(e) = sock.send(&spec::ka2_pkt1(ka2_cnt, ka2_flag, rand_num, key)) {
-                let msg = format!("ka2_pkt1（重发）发送失败: {e}");
-                log::error!("心跳：{msg}");
+                let msg = format!("ka2_pkt1 (retry) send failed: {e}");
+                log::error!("Heartbeat: {msg}");
                 let _ = status_tx.send(HeartbeatStatus::Error(msg.clone()));
                 return Err(msg);
             }
             let resp = match recv_retry(&sock, &stop) {
                 Some(r) => r,
                 None => {
-                    log::warn!("心跳：ka2_pkt1（重发）无响应，重置本轮");
+                    log::warn!("Heartbeat: ka2_pkt1 (retry) no response, resetting round");
                     continue;
                 }
             };
@@ -197,7 +203,7 @@ pub fn run_blocking(
                 }
                 None => {
                     log::warn!(
-                        "心跳：ka2（重发）响应无法解析（{} 字节），重置本轮",
+                        "Heartbeat: failed to parse ka2 (retry) response ({} bytes), resetting round",
                         resp.len()
                     );
                     continue;
@@ -212,7 +218,10 @@ pub fn run_blocking(
                     }
                 }
                 None => {
-                    log::warn!("心跳：ka2 响应无法解析（{} 字节），重置本轮", resp.len());
+                    log::warn!(
+                        "Heartbeat: failed to parse ka2 response ({} bytes), resetting round",
+                        resp.len()
+                    );
                     continue;
                 }
             }
@@ -220,8 +229,8 @@ pub fn run_blocking(
 
         let rand_num = new_rand();
         if let Err(e) = sock.send(&spec::ka2_pkt2(ka2_cnt, ka2_flag, rand_num, key, host_ip)) {
-            let msg = format!("ka2_pkt2 发送失败: {e}");
-            log::error!("心跳：{msg}");
+            let msg = format!("ka2_pkt2 send failed: {e}");
+            log::error!("Heartbeat: {msg}");
             let _ = status_tx.send(HeartbeatStatus::Error(msg.clone()));
             return Err(msg);
         }
@@ -230,7 +239,7 @@ pub fn run_blocking(
         ka1_cnt = spec::next_cnt(ka1_cnt);
         ka2_cnt = spec::next_cnt(ka2_cnt);
         if !sleep_interruptible(interval.saturating_sub(KA1_TO_KA2_DELAY), &stop) {
-            log::info!("心跳：停止信号，退出会话循环");
+            log::info!("Heartbeat: stop signal, exiting session loop");
             return Ok(());
         }
     }

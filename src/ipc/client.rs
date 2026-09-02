@@ -45,8 +45,10 @@ mod win {
                 // 仅 CLI 同步上下文使用；executor 内复用须换 tokio sleep（Task 14）。
                 std::thread::sleep(CONNECT_RETRY_DELAY);
             }
-            let io_err = last_err.unwrap_or_else(|| std::io::Error::other("无可用管道实例"));
-            Err(io_err).with_context(|| format!("连接 {PIPE_NAME} 失败（服务未运行？）"))
+            let io_err =
+                last_err.unwrap_or_else(|| std::io::Error::other("No available pipe instance"));
+            Err(io_err)
+                .with_context(|| format!("Failed to connect to {PIPE_NAME} (service not running?)"))
         }
 
         /// 读一帧 `ServerMsg::State` 并返回快照。Ack 或非法帧跳过继续读。
@@ -57,7 +59,7 @@ mod win {
                     match serde_json::from_slice::<ServerMsg>(&frame) {
                         Ok(ServerMsg::State { state }) => return Ok(state),
                         Ok(ServerMsg::Ack) => continue,
-                        Err(e) => log::debug!("忽略非法服务端帧: {e}"),
+                        Err(e) => log::debug!("Ignoring invalid server frame: {e}"),
                     }
                 }
                 let mut chunk = [0u8; 4096];
@@ -65,9 +67,9 @@ mod win {
                     .pipe
                     .read(&mut chunk)
                     .await
-                    .context("读取管道失败（服务已退出？）")?;
+                    .context("Failed to read pipe (service exited?)")?;
                 if n == 0 {
-                    anyhow::bail!("服务端关闭了连接");
+                    anyhow::bail!("Server closed the connection");
                 }
                 self.buf.extend(self.decoder.feed(&chunk[..n]));
             }
@@ -76,8 +78,11 @@ mod win {
         /// 发送一条命令给服务端。
         pub async fn send_cmd(&mut self, c: Command) -> Result<()> {
             let frame = encode_frame(&ClientMsg::Cmd { c });
-            self.pipe.write_all(&frame).await.context("写入管道失败")?;
-            self.pipe.flush().await.context("刷新管道失败")?;
+            self.pipe
+                .write_all(&frame)
+                .await
+                .context("Failed to write to pipe")?;
+            self.pipe.flush().await.context("Failed to flush pipe")?;
             Ok(())
         }
     }
@@ -87,12 +92,15 @@ mod win {
         let mut client = PipeClient::connect()?;
         let s = client.next_state().await?;
 
-        println!("状态:     {}", s.status_text());
-        println!("在线时长: {}", s.uptime_text());
+        println!("Status:     {}", s.status_text());
+        println!("Uptime:   {}", s.uptime_text());
         println!("IP:       {}", s.ip.as_deref().unwrap_or("—"));
-        println!("掉线原因: {}", s.last_drop_reason.as_deref().unwrap_or("—"));
-        println!("重拨次数: {}", s.redial_attempts);
-        println!("心跳:     {}", s.heartbeat_text());
+        println!(
+            "Drop reason: {}",
+            s.last_drop_reason.as_deref().unwrap_or("—")
+        );
+        println!("Redial attempts: {}", s.redial_attempts);
+        println!("Heartbeat: {}", s.heartbeat_text());
         Ok(())
     }
 }

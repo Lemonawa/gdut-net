@@ -3,7 +3,11 @@ use anyhow::bail;
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 #[derive(Parser)]
-#[command(name = "gdut-net", version, about = "GDUT 有线网第三方认证客户端")]
+#[command(
+    name = "gdut-net",
+    version,
+    about = "GDUT wired network third-party client"
+)]
 pub struct Cli {
     #[arg(
         long,
@@ -47,7 +51,7 @@ pub fn dispatch() -> Result<()> {
         crate::logging::init_cli_logging();
     }
     // Windows 控制台默认代码页 GBK，而我们的字符串字面量是 UTF-8，
-    // 不设 65001 会输出乱码（如"璇疯緭鍏ュ瘑鐮?"）。服务分支无需控制台。
+    // 不设 65001 会输出乱码（如"Please enter password?"）。服务分支无需控制台。
     #[cfg(windows)]
     if !matches!(cli.cmd, Cmd::Run) {
         unsafe {
@@ -60,25 +64,25 @@ pub fn dispatch() -> Result<()> {
         #[cfg(windows)]
         Cmd::Run => crate::service::service_main(),
         #[cfg(not(windows))]
-        Cmd::Run => bail!("run 仅支持 Windows"),
+        Cmd::Run => bail!("run is only supported on Windows"),
         #[cfg(windows)]
         Cmd::Install => crate::service::install(&cli.config, cli.password_stdin),
         #[cfg(not(windows))]
-        Cmd::Install => bail!("install 仅支持 Windows"),
+        Cmd::Install => bail!("install is only supported on Windows"),
         #[cfg(windows)]
         Cmd::Uninstall { purge } => crate::service::uninstall(&cli.config, purge),
         #[cfg(not(windows))]
-        Cmd::Uninstall { purge: _ } => bail!("uninstall 仅支持 Windows"),
+        Cmd::Uninstall { purge: _ } => bail!("uninstall is only supported on Windows"),
         #[cfg(windows)]
         Cmd::Status => tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()?
             .block_on(crate::ipc::client::status_once()),
         #[cfg(not(windows))]
-        Cmd::Status => bail!("status 仅支持 Windows"),
+        Cmd::Status => bail!("status is only supported on Windows"),
         #[cfg(windows)]
         Cmd::Tray => crate::tray::run_tray(),
         #[cfg(not(windows))]
-        Cmd::Tray => bail!("tray 仅支持 Windows"),
+        Cmd::Tray => bail!("tray is only supported on Windows"),
     }
 }

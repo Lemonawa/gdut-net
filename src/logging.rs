@@ -34,10 +34,11 @@ pub fn init_cli_logging() {
 /// 返回的 [`LoggerHandle`] 必须持有到进程退出——Drop 会 flush 并关闭
 /// FileLogWriter，提前丢弃等于掐断后续所有文件日志。
 pub fn init_service_logging(cfg: &LogCfg) -> Result<LoggerHandle> {
-    std::fs::create_dir_all(&cfg.dir).with_context(|| format!("创建日志目录失败: {}", cfg.dir))?;
+    std::fs::create_dir_all(&cfg.dir)
+        .with_context(|| format!("Failed to create log directory: {}", cfg.dir))?;
 
     let (inner, handle) = Logger::try_with_str("info")
-        .context("日志规格解析失败")?
+        .context("Failed to parse log spec")?
         .log_to_file(FileSpec::default().directory(&cfg.dir))
         .format(flexi_logger::detailed_format)
         // 服务重启后续写 rCURRENT，而非截断丢历史（Size 滚动与 append 兼容）。
@@ -48,7 +49,7 @@ pub fn init_service_logging(cfg: &LogCfg) -> Result<LoggerHandle> {
             Cleanup::KeepLogFiles(cfg.rotate_keep as usize),
         )
         .build()
-        .context("日志器构建失败（日志目录不可写？）")?;
+        .context("Failed to build logger (log dir not writable?)")?;
 
     install_logger(inner, cfg.event_log)?;
     Ok(handle)
@@ -67,7 +68,7 @@ fn install_logger(inner: Box<dyn log::Log>, event_log: bool) -> Result<()> {
         match crate::eventlog::EventLog::open() {
             Ok(log) => Some(EventLogSink(log)),
             Err(e) => {
-                eprintln!("gdut-net: 打开事件日志失败，降级为仅文件日志: {e:#}");
+                eprintln!("Failed to open event log, falling back to file only: {e:#}");
                 None
             }
         }
@@ -76,7 +77,7 @@ fn install_logger(inner: Box<dyn log::Log>, event_log: bool) -> Result<()> {
     };
 
     log::set_boxed_logger(Box::new(ServiceLogger { inner, sink }))
-        .context("注册全局日志器失败（重复初始化？）")?;
+        .context("Failed to register global logger (already initialized?)")?;
     log::set_max_level(log::LevelFilter::Info);
     Ok(())
 }
@@ -84,7 +85,8 @@ fn install_logger(inner: Box<dyn log::Log>, event_log: bool) -> Result<()> {
 #[cfg(not(windows))]
 fn install_logger(inner: Box<dyn log::Log>, _event_log: bool) -> Result<()> {
     // 非 Windows 无事件日志，仅文件输出（本分支仅为编译/测试存在）。
-    log::set_boxed_logger(inner).context("注册全局日志器失败（重复初始化？）")?;
+    log::set_boxed_logger(inner)
+        .context("Failed to register global logger (already initialized?)")?;
     log::set_max_level(log::LevelFilter::Info);
     Ok(())
 }
@@ -139,7 +141,7 @@ impl log::Log for ServiceLogger {
         );
         // 事件日志写失败不得 log::warn!（递归），回落 stderr。
         if let Err(e) = sink.0.report(level, &msg) {
-            eprintln!("gdut-net: 事件日志写入失败: {e:#}");
+            eprintln!("Failed to write event log: {e:#}");
         }
     }
 

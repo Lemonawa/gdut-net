@@ -196,24 +196,24 @@ mod win {
         let addr: SocketAddr = parse_http_probe_target(http_url)
             .and_then(|(_, hostport)| hostport.parse().ok())
             .or_else(|| {
-                log::debug!("探测：HTTP 地址解析失败 {http_url}");
+                log::debug!("Probe: failed to parse HTTP URL {http_url}");
                 None
             })?;
         let socket = match Socket::new(Domain::IPV4, Type::STREAM, Some(Protocol::TCP)) {
             Ok(s) => s,
             Err(e) => {
-                log::debug!("探测：套接字创建失败：{e}");
+                log::debug!("Probe: socket creation failed: {e}");
                 return None;
             }
         };
         if let Err(e) = socket.bind(&SocketAddr::from((src_ip, 0)).into()) {
-            log::debug!("探测：绑源 IP {src_ip} 失败：{e}");
+            log::debug!("Probe: failed to bind source IP {src_ip}: {e}");
             return None;
         }
         socket.set_read_timeout(Some(HTTP_TIMEOUT)).ok()?;
         socket.set_write_timeout(Some(HTTP_TIMEOUT)).ok()?;
         if let Err(e) = socket.connect_timeout(&addr.into(), HTTP_TIMEOUT) {
-            log::debug!("探测：HTTP connect {addr} 超时/失败：{e}");
+            log::debug!("Probe: HTTP connect {addr} timeout/failed: {e}");
             return None;
         }
         let mut stream = TcpStream::from(socket);
@@ -248,7 +248,7 @@ mod win {
         let handle: HANDLE = match unsafe { IcmpCreateFile() } {
             Ok(h) if !h.is_invalid() => h,
             Err(e) => {
-                log::debug!("探测：IcmpCreateFile 失败：{e}");
+                log::debug!("Probe: IcmpCreateFile failed: {e}");
                 return false;
             }
             _ => return false,
@@ -277,7 +277,7 @@ mod win {
             let status = unsafe { (*(reply_buf.as_ptr() as *const ICMP_ECHO_REPLY)).Status };
             status == 0
         } else {
-            log::debug!("探测：网关 {gateway} ICMP 不通（超时/不可达）");
+            log::debug!("Probe: gateway {gateway} ICMP unreachable (timeout/unreachable)");
             false
         };
         unsafe {
@@ -289,7 +289,7 @@ mod win {
     /// 两级探测（ADR-0003）：每次都走两级——网关 ICMP 探链路 + HTTP 复核探被踢，
     /// 结果经 [`combine`] 综合判定。被踢时网关仍通，单看 ICMP 会漏判僵死会话。
     ///
-    /// PPPoE 会话口的"网关"常为 0.0.0.0（未指定），此时 ICMP 目标退化为
+    /// PPPoE 会话口的"gateway"常为 0.0.0.0（未指定），此时 ICMP 目标退化为
     /// 公共探活地址 223.5.5.5（校园网实测可达；9.9.9.9 被校园网拦截不可用）。
     pub async fn probe_once(
         src_ip: Ipv4Addr,
@@ -317,16 +317,16 @@ mod win {
             });
         let verdict = combine(icmp_ok, http);
         log::info!(
-            "探测：ICMP {}，HTTP 复核 {} → {verdict:?}",
+            "Probe: ICMP {}, HTTP {} -> {verdict:?}",
             match icmp_ok {
-                Some(true) => "通",
-                Some(false) => "不通",
-                None => "未执行",
+                Some(true) => "reachable",
+                Some(false) => "unreachable",
+                None => "skipped",
             },
             match http {
-                Some(ProbeVerdict::Kicked) => "判被踢",
-                Some(ProbeVerdict::Alive) => "判在线",
-                Some(ProbeVerdict::LinkDown) | None => "失败/不可判",
+                Some(ProbeVerdict::Kicked) => "kicked",
+                Some(ProbeVerdict::Alive) => "alive",
+                Some(ProbeVerdict::LinkDown) | None => "failed/inconclusive",
             },
         );
         verdict

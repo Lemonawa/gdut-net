@@ -1,7 +1,7 @@
 //! 守护状态机：拨号 → 探测 → 掉线重拨的单一状态源。
 //!
 //! 平台能力通过 [`Dialer`]/[`Prober`] trait 注入，纯逻辑可在 Linux 上 TDD。
-//! "掉线"以流量探测为准（不单看 RAS 状态）；`is_connected()==false`
+//! "Drop"以流量探测为准（不单看 RAS 状态）；`is_connected()==false`
 //! 是可靠的即时掉线信号（上游语义：668 连接不存在归 Disconnected）。
 
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -137,11 +137,11 @@ impl Watchdog {
     /// 返回建议等待时长。
     pub async fn run_once(&mut self) -> Duration {
         if self.redial_requested.swap(false, Ordering::SeqCst) {
-            log::info!("收到手动重拨请求，立即执行");
+            log::info!("Manual redial requested, executing immediately");
             // 会话仍活（RAS 层或刚建立）时直接二次 RasDial 会失败并陷入
             // Backoff 死循环：复用掉线路径——挂断 + 状态清理，再拨。
             if self.phase == Phase::Connected || self.dialer.is_connected() {
-                self.record_drop("手动重拨");
+                self.record_drop("Manual redial");
                 self.dialer.hangup().await;
             }
             return self.do_dial().await;
@@ -154,8 +154,8 @@ impl Watchdog {
 
     async fn step_connected(&mut self) -> Duration {
         if !self.dialer.is_connected() {
-            log::warn!("RAS 会话已不存在，判定掉线，立即重拨");
-            self.record_drop("RAS 会话不存在");
+            log::warn!("RAS session gone, considered dropped, redialing immediately");
+            self.record_drop("RAS session not found");
             self.dialer.hangup().await;
             return self.do_dial().await;
         }
@@ -166,7 +166,7 @@ impl Watchdog {
                 self.stable_for += self.cfg.probe_interval;
                 if self.stable_for >= STABLE_RESET_AFTER && self.attempts > 0 {
                     log::info!(
-                        "会话稳定 ≥{}s，重置退避与重拨计数（此前 {} 次）",
+                        "Session stable for >= {}s, resetting backoff and redial count (was {} attempts)",
                         STABLE_RESET_AFTER.as_secs(),
                         self.attempts
                     );
@@ -179,16 +179,19 @@ impl Watchdog {
                 self.probe_fails += 1;
                 if self.probe_fails < 2 {
                     log::warn!(
-                        "探测异常（{bad:?}），{}s 后复核",
+                        "Probe anomaly ({bad:?}), rechecking in {}s",
                         (self.cfg.probe_interval / 4).as_secs()
                     );
                     self.cfg.probe_interval / 4
                 } else {
                     log::warn!(
-                        "探测连续 {} 次异常（{bad:?}），判定掉线，挂断并重拨",
+                        "Probe failed {} times in a row ({bad:?}), considered dropped, hanging up and redialing",
                         self.probe_fails
                     );
-                    self.record_drop(&format!("探测连续 {} 次异常（{bad:?}）", self.probe_fails));
+                    self.record_drop(&format!(
+                        "Probe failed {} times ({bad:?})",
+                        self.probe_fails
+                    ));
                     self.dialer.hangup().await;
                     self.do_dial().await
                 }
@@ -201,7 +204,7 @@ impl Watchdog {
         self.dial_calls += 1;
         match self.dialer.dial().await {
             Ok(()) => {
-                log::info!("拨号成功，会话建立");
+                log::info!("Dial succeeded, session established");
                 self.phase = Phase::Connected;
                 self.since = Some(SystemTime::now());
                 self.probe_fails = 0;
@@ -214,9 +217,12 @@ impl Watchdog {
                 msg,
             }) => {
                 let delay = self.cfg.auth_fail_delay;
-                log::error!("认证失败（{code}）：{msg}，{}s 后重试", delay.as_secs());
+                log::error!(
+                    "Authentication failed ({code}): {msg}, retry in {}s",
+                    delay.as_secs()
+                );
                 self.phase = Phase::AuthFail;
-                self.last_drop_reason = Some(format!("认证失败 {code}: {msg}"));
+                self.last_drop_reason = Some(format!("Auth failed {code}: {msg}"));
                 delay
             }
             Err(DialError {
@@ -227,12 +233,12 @@ impl Watchdog {
                 let delay = self.backoff.next_delay();
                 self.attempts = self.attempts.saturating_add(1);
                 log::warn!(
-                    "拨号失败（{code}）：{msg}，{}s 后重拨（第 {} 次）",
+                    "Dial failed ({code}): {msg}, retry in {}s (attempt {})",
                     delay.as_secs(),
                     self.attempts
                 );
                 self.phase = Phase::Backoff;
-                self.last_drop_reason = Some(format!("拨号失败 {code}: {msg}"));
+                self.last_drop_reason = Some(format!("Dial failed {code}: {msg}"));
                 delay
             }
         }

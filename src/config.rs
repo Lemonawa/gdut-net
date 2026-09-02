@@ -86,9 +86,9 @@ impl Default for LogCfg {
 impl Config {
     pub fn load(path: &Path) -> Result<Config> {
         let raw = fs::read_to_string(path)
-            .with_context(|| format!("读取配置文件失败: {}", path.display()))?;
+            .with_context(|| format!("Failed to read config file: {}", path.display()))?;
         let cfg: Config = toml::from_str(&raw)
-            .with_context(|| format!("解析配置文件失败: {}", path.display()))?;
+            .with_context(|| format!("Failed to parse config file: {}", path.display()))?;
         cfg.validate()?;
         Ok(cfg)
     }
@@ -97,31 +97,32 @@ impl Config {
         if let Some(parent) = path.parent() {
             if !parent.as_os_str().is_empty() {
                 fs::create_dir_all(parent)
-                    .with_context(|| format!("创建目录失败: {}", parent.display()))?;
+                    .with_context(|| format!("Failed to create directory: {}", parent.display()))?;
             }
         }
-        let body = toml::to_string_pretty(self).context("序列化配置失败")?;
-        fs::write(path, body).with_context(|| format!("写入配置文件失败: {}", path.display()))?;
+        let body = toml::to_string_pretty(self).context("Failed to serialize config")?;
+        fs::write(path, body)
+            .with_context(|| format!("Failed to write config file: {}", path.display()))?;
         Ok(())
     }
 
     pub fn validate(&self) -> Result<()> {
         if self.account.student_id.trim().is_empty() {
-            anyhow::bail!("account.student_id 不能为空");
+            anyhow::bail!("account.student_id must not be empty");
         }
         if self.heartbeat.enabled && self.heartbeat.module != HEARTBEAT_MODULE_GDUT {
             anyhow::bail!(
-                "heartbeat.module 只支持 \"{}\"，当前为 {:?}",
+                "heartbeat.module only supports \"{}\", got {:?}",
                 HEARTBEAT_MODULE_GDUT,
                 self.heartbeat.module
             );
         }
         if self.dial.probe_interval_secs < 5 {
-            anyhow::bail!("dial.probe_interval_secs 不得小于 5 秒");
+            anyhow::bail!("dial.probe_interval_secs must be >= 5");
         }
         if crate::probe::parse_http_probe_target(&self.dial.http_probe_url).is_none() {
             anyhow::bail!(
-                "dial.http_probe_url 必须是 http:// 加 IPv4 字面量（可带端口），当前为 {:?}",
+                "dial.http_probe_url must be http:// + IPv4 literal (with optional port), got {:?}",
                 self.dial.http_probe_url
             );
         }
@@ -130,11 +131,11 @@ impl Config {
 
     pub fn sample() -> String {
         let mut cfg = Config::default();
-        cfg.account.student_id = "你的学号".into();
+        cfg.account.student_id = "your_student_id".into();
         cfg.account.password_blob = String::new();
         format!(
-            "# 大学城认证服务器 10.0.3.2；龙洞/东风路为 10.0.3.6\n# 心跳默认关闭；开启前必须抓包验证（见 ADR-0002）\n{}",
-            toml::to_string_pretty(&cfg).expect("默认配置可序列化")
+            "# University Town auth server 10.0.3.2; Longdong/Dongfeng Road is 10.0.3.6\n# Heartbeat disabled by default; must verify via packet capture before enabling (see ADR-0002)\n{}",
+            toml::to_string_pretty(&cfg).expect("default config is serializable")
         )
     }
 }

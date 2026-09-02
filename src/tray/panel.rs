@@ -21,10 +21,10 @@ static PANEL_CTX: Mutex<Option<egui::Context>> = Mutex::new(None);
 
 /// 打开状态面板；已开则前置既有窗口。
 ///
-/// `redial_tx`：面板"立即重拨"按钮 → 托盘泵线程（由泵线程统一操作
+/// `redial_tx`：面板"Redial now"按钮 → 托盘泵线程（由泵线程统一操作
 /// PipeClient）。
 pub fn show(snapshot: SharedSnapshot, redial_tx: Sender<()>) {
-    let guard = PANEL_CTX.lock().expect("PANEL_CTX 中毒");
+    let guard = PANEL_CTX.lock().expect("PANEL_CTX poisoned");
     if let Some(ctx) = guard.as_ref() {
         ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
         return;
@@ -34,7 +34,7 @@ pub fn show(snapshot: SharedSnapshot, redial_tx: Sender<()>) {
     struct CtxGuard;
     impl Drop for CtxGuard {
         fn drop(&mut self) {
-            *PANEL_CTX.lock().expect("PANEL_CTX 中毒") = None;
+            *PANEL_CTX.lock().expect("PANEL_CTX poisoned") = None;
         }
     }
 
@@ -43,20 +43,20 @@ pub fn show(snapshot: SharedSnapshot, redial_tx: Sender<()>) {
         .spawn(move || {
             let _guard = CtxGuard;
             if let Err(e) = run(snapshot, redial_tx) {
-                log::warn!("状态面板异常退出: {e:#}");
+                log::warn!("Status panel exited abnormally: {e:#}");
             }
         });
     if let Err(e) = spawned {
         // 线程没起来，CtxGuard 不会运行；这里手动清注册。
-        *PANEL_CTX.lock().expect("PANEL_CTX 中毒") = None;
-        log::warn!("启动面板线程失败: {e}");
+        *PANEL_CTX.lock().expect("PANEL_CTX poisoned") = None;
+        log::warn!("Failed to start panel thread: {e}");
     }
 }
 
 fn run(snapshot: SharedSnapshot, redial_tx: Sender<()>) -> Result<()> {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_title("gdut-net 状态")
+            .with_title("gdut-net Status")
             .with_inner_size(egui::vec2(380.0, 250.0))
             .with_resizable(false),
         ..Default::default()
@@ -72,12 +72,12 @@ fn run(snapshot: SharedSnapshot, redial_tx: Sender<()>) -> Result<()> {
             }))
         }),
     )
-    .map_err(|e| anyhow::anyhow!("eframe 运行失败: {e}"))
+    .map_err(|e| anyhow::anyhow!("eframe failed: {e}"))
 }
 
 struct Panel {
     snapshot: SharedSnapshot,
-    /// "立即重拨" → 托盘泵线程。
+    /// "Redial now" → 托盘泵线程。
     redial_tx: Sender<()>,
     /// 点击置位，ui 闭包外逐帧消费（闭包内只改自身状态，不做 IO）。
     redial_clicked: bool,
@@ -88,33 +88,33 @@ impl eframe::App for Panel {
         // 定时重绘：在线时长需要秒级跳动，不依赖输入事件。
         ui.ctx().request_repaint_after(REFRESH);
         // 首帧注册 Context，供 show 前置已开窗口。
-        *PANEL_CTX.lock().expect("PANEL_CTX 中毒") = Some(ui.ctx().clone());
+        *PANEL_CTX.lock().expect("PANEL_CTX poisoned") = Some(ui.ctx().clone());
 
         egui::CentralPanel::default()
             .frame(egui::Frame::default().inner_margin(egui::Margin::same(14)))
             .show(ui, |ui| {
-                ui.heading("gdut-net 状态");
+                ui.heading("gdut-net Status");
                 ui.add_space(10.0);
 
-                let guard = self.snapshot.lock().expect("快照缓存中毒");
+                let guard = self.snapshot.lock().expect("snapshot cache poisoned");
                 match guard.as_ref() {
                     None => {
                         ui.colored_label(
                             egui::Color32::ORANGE,
-                            "未连接到 gdut-net 服务（服务未运行？）",
+                            "Not connected to gdut-net service (not running?)",
                         );
                     }
                     Some(s) => {
                         let rows: [(&str, String); 6] = [
-                            ("状态", s.status_text()),
-                            ("在线时长", s.uptime_text()),
+                            ("Status", s.status_text()),
+                            ("Uptime", s.uptime_text()),
                             ("IP", s.ip.clone().unwrap_or_else(|| "—".into())),
                             (
-                                "掉线原因",
+                                "Drop reason",
                                 s.last_drop_reason.clone().unwrap_or_else(|| "—".into()),
                             ),
-                            ("重拨次数", s.redial_attempts.to_string()),
-                            ("心跳", s.heartbeat_text()),
+                            ("Redial attempts", s.redial_attempts.to_string()),
+                            ("Heartbeat", s.heartbeat_text()),
                         ];
                         egui::Grid::new("status-grid")
                             .num_columns(2)
@@ -131,7 +131,7 @@ impl eframe::App for Panel {
                 drop(guard);
 
                 ui.add_space(14.0);
-                if ui.button("立即重拨").clicked() {
+                if ui.button("Redial now").clicked() {
                     self.redial_clicked = true;
                 }
             });

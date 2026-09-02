@@ -65,13 +65,13 @@ fn snapshot_texts() {
         redial_attempts: 0,
         heartbeat: HeartbeatStatus::Off,
     };
-    assert_eq!(snap.status_text(), "已连接");
+    assert_eq!(snap.status_text(), "Connected");
     assert_eq!(snap.uptime_text(), "—");
-    assert_eq!(snap.heartbeat_text(), "关闭");
+    assert_eq!(snap.heartbeat_text(), "Off");
 
     snap.heartbeat = HeartbeatStatus::Error("seed 校验失败".into());
-    assert_eq!(snap.heartbeat_text(), "错误（seed 校验失败）");
+    assert_eq!(snap.heartbeat_text(), "Error (seed 校验失败)");
 
     snap.status = SessionStatus::Backoff;
-    assert_eq!(snap.status_text(), "重拨中（退避等待）");
+    assert_eq!(snap.status_text(), "Backoff (retrying)");
 }

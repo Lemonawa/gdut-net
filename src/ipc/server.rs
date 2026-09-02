@@ -65,7 +65,7 @@ mod win {
                                         let _ = cmd_tx.send(c).await;
                                     }
                                     Err(e) => {
-                                        log::debug!("忽略非法客户端消息: {e}");
+                                        log::debug!("Ignoring invalid client message: {e}");
                                     }
                                 }
                             }
@@ -100,7 +100,7 @@ mod win {
                     p = listen_once() => match p {
                         Ok(pipe) => pipe,
                         Err(e) => {
-                            log::warn!("IPC 管道创建/连接失败，1s 后重试: {e}");
+                            log::warn!("IPC pipe create/connect failed, retry in 1s: {e}");
                             tokio::select! {
                                 _ = stop.cancelled() => break,
                                 _ = tokio::time::sleep(std::time::Duration::from_secs(1)) => {}
@@ -112,7 +112,7 @@ mod win {
                 let snapshot_rx = snapshot_rx.clone();
                 tokio::spawn(serve_client(pipe, snapshot_rx, cmd_tx.clone()));
             }
-            log::info!("IPC server 退出");
+            log::info!("IPC server exiting");
         });
     }
 }

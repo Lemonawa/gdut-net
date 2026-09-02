@@ -69,7 +69,7 @@ mod win {
     }
 
     fn win32_err(step: &str, code: WIN32_ERROR) -> anyhow::Error {
-        anyhow!("{step} 失败: 错误码 {}", code.0)
+        anyhow!("{step} failed: error {}", code.0)
     }
 
     /// 读取 HKLM\SOFTWARE\gdut-net 下 entropy 值；不存在/损坏则生成 32B 随机并写入。
@@ -158,7 +158,7 @@ mod win {
             )
         };
         if let Err(e) = ret {
-            return Err(anyhow!("CryptProtectData 失败: {e}"));
+            return Err(anyhow!("CryptProtectData failed: {e}"));
         }
         // SAFETY：cbData/pbData 由 DPAPI 填充；拷贝必须在 LocalFree 之前完成。
         let protected = unsafe { std::slice::from_raw_parts(out.pbData, out.cbData as usize) };
@@ -170,7 +170,7 @@ mod win {
     /// 解 blob 并 DPAPI 解密；entropy 不匹配或密文损坏均报错。
     pub fn unprotect(blob: &str) -> Result<String> {
         let (entropy_hex, protected) =
-            unwrap_blob(blob).context("blob 格式非法（应为 GDUT1:<hex>:<base64>）")?;
+            unwrap_blob(blob).context("Invalid blob format (expected GDUT1:<hex>:<base64>)")?;
         let entropy = hex_decode(&entropy_hex)?;
 
         let mut out = CRYPT_INTEGER_BLOB::default();
@@ -192,12 +192,12 @@ mod win {
             )
         };
         if let Err(e) = ret {
-            return Err(anyhow!("CryptUnprotectData 失败: {e}"));
+            return Err(anyhow!("CryptUnprotectData failed: {e}"));
         }
         // SAFETY：同 protect；拷贝必须在 LocalFree 之前完成。
         let plain_bytes = unsafe { std::slice::from_raw_parts(out.pbData, out.cbData as usize) };
         let plain = String::from_utf8(plain_bytes.to_vec())
-            .context("解密结果不是合法 UTF-8（blob 损坏或 entropy 不匹配）");
+            .context("Decrypted result is not valid UTF-8 (blob corrupted or entropy mismatch)");
         unsafe { LocalFree(Some(HLOCAL(out.pbData.cast()))) };
         plain
     }

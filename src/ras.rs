@@ -63,7 +63,10 @@ mod win {
     /// str → 定长 UTF-16 缓冲（null 结尾，超长截断）。len 为缓冲总长，含 null 位。
     /// 调用点约定：len ≥ 1（必须给 null 留位），防御性断言拦截笔误。
     fn wide(s: &str, len: usize) -> Vec<u16> {
-        assert!(len >= 1, "wide: len 必须 ≥ 1（null 结尾至少占 1 位）");
+        assert!(
+            len >= 1,
+            "wide: len must be >= 1 (null terminator requires 1)"
+        );
         let mut buf = Vec::with_capacity(len);
         buf.extend(s.encode_utf16().take(len - 1));
         buf.resize(len, 0);
@@ -76,7 +79,7 @@ mod win {
     }
 
     fn ras_err(step: &str, code: u32) -> anyhow::Error {
-        anyhow!("{step} 失败: 错误码 {code} ({})", error_string(code))
+        anyhow!("{step} failed: error {code} ({})", error_string(code))
     }
 
     /// RasGetErrorStringW 取 RAS 错误描述；取不到时回退错误码本身。
@@ -84,7 +87,7 @@ mod win {
         let mut buf = [0u16; 1024];
         let ret = unsafe { RasGetErrorStringW(code, &mut buf) };
         if ret != 0 {
-            return format!("RAS 错误 {code}");
+            return format!("RAS error {code}");
         }
         let end = buf.iter().position(|&c| c == 0).unwrap_or(buf.len());
         String::from_utf16_lossy(&buf[..end])
@@ -102,10 +105,12 @@ mod win {
             dwFramingProtocol: RASFP_Ppp,
             dwfNetProtocols: RASNP_Ip | RASNP_Ipx | RASNP_NetBEUI,
             dwEncryptionType: ET_Require,
-            szDeviceType: wide("PPPoE", 17).try_into().expect("szDeviceType 定长 17"),
+            szDeviceType: wide("PPPoE", 17)
+                .try_into()
+                .expect("szDeviceType must be 17"),
             szDeviceName: wide("WAN Miniport (PPPoE)", 129)
                 .try_into()
-                .expect("szDeviceName 定长 129"),
+                .expect("szDeviceName must be 129"),
             ..RASENTRYW::default()
         };
 
@@ -119,7 +124,7 @@ mod win {
             // 参数符合预期则视为成功（端口释放后即可拨号），避免在 Dr.COM 在线时 install 失败。
             if ret == 816 {
                 log::warn!(
-                    "RasSetEntryPropertiesW 返回 816（端口占用），视为成功（端口释放后可拨号）"
+                    "RasSetEntryPropertiesW returned 816 (port in use), treating as success (will dial after port released)"
                 );
                 return Ok(());
             }
@@ -133,8 +138,8 @@ mod win {
         let cred = RASCREDENTIALSW {
             dwSize: size_of::<RASCREDENTIALSW>() as u32,
             dwMask: RASCM_UserName | RASCM_Password,
-            szUserName: wide(user, 257).try_into().expect("szUserName 定长 257"),
-            szPassword: wide(pass, 257).try_into().expect("szPassword 定长 257"),
+            szUserName: wide(user, 257).try_into().expect("szUserName must be 257"),
+            szPassword: wide(pass, 257).try_into().expect("szPassword must be 257"),
             ..RASCREDENTIALSW::default()
         };
 
@@ -156,7 +161,7 @@ mod win {
                 code: code @ (756 | 813),
                 ..
             }) => {
-                log::warn!("拨号 {code}（旧会话残留），枚举挂断后重试一次");
+                log::warn!("Dial {code} (stale session present), hanging up enumerated session and retrying once");
                 if let Some(h) = find_entry_connection(pbk, name) {
                     unsafe {
                         let _ = RasHangUpW(h);
@@ -172,9 +177,9 @@ mod win {
     fn dial_once(pbk: &str, name: &str, user: &str, pass: &str) -> Result<RasSession, RasError> {
         let params = RASDIALPARAMSW {
             dwSize: size_of::<RASDIALPARAMSW>() as u32,
-            szEntryName: wide(name, 257).try_into().expect("szEntryName 定长 257"),
-            szUserName: wide(user, 257).try_into().expect("szUserName 定长 257"),
-            szPassword: wide(pass, 257).try_into().expect("szPassword 定长 257"),
+            szEntryName: wide(name, 257).try_into().expect("szEntryName must be 257"),
+            szUserName: wide(user, 257).try_into().expect("szUserName must be 257"),
+            szPassword: wide(pass, 257).try_into().expect("szPassword must be 257"),
             ..RASDIALPARAMSW::default()
         };
 
@@ -212,7 +217,7 @@ mod win {
             ret = unsafe { RasEnumConnectionsW(Some(buf.as_mut_ptr()), &mut size, &mut count) };
         }
         if ret != ERROR_SUCCESS_RAW {
-            log::warn!("RasEnumConnectionsW 失败: {ret}");
+            log::warn!("RasEnumConnectionsW failed: {ret}");
             return None;
         }
         let name_w: Vec<u16> = name.encode_utf16().collect();
@@ -264,15 +269,16 @@ mod win {
         })
     }
 
+    #[allow(dead_code)]
     fn pbk_eq(buf: &[u16], pbk: &[u16]) -> bool {
         pbk_eq_ci(buf, pbk)
     }
     /// RasDial 失败：Auth 走守护层 AuthFail 长退避，Other 带码走指数退避。
     #[derive(Debug, thiserror::Error)]
     pub enum RasError {
-        #[error("认证失败(691)：学号或密码错误")]
+        #[error("Authentication failed (691): invalid student ID or password")]
         Auth,
-        #[error("RAS 错误 {code}: {msg}")]
+        #[error("RAS error {code}: {msg}")]
         Other { code: u32, msg: String },
     }
 

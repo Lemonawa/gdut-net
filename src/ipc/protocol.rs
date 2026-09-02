@@ -33,11 +33,11 @@ impl StateSnapshot {
     /// 状态的中文描述（`status` 子命令与托盘共用）。
     pub fn status_text(&self) -> String {
         match self.status {
-            SessionStatus::Idle => "空闲",
-            SessionStatus::Dialing => "拨号中",
-            SessionStatus::Connected => "已连接",
-            SessionStatus::Backoff => "重拨中（退避等待）",
-            SessionStatus::AuthFail => "认证失败",
+            SessionStatus::Idle => "Idle",
+            SessionStatus::Dialing => "Dialing",
+            SessionStatus::Connected => "Connected",
+            SessionStatus::Backoff => "Backoff (retrying)",
+            SessionStatus::AuthFail => "Auth failed",
         }
         .to_string()
     }
@@ -59,9 +59,9 @@ impl StateSnapshot {
     /// 心跳状态的中文描述。
     pub fn heartbeat_text(&self) -> String {
         match &self.heartbeat {
-            HeartbeatStatus::Off => "关闭".to_string(),
-            HeartbeatStatus::Running => "运行中".to_string(),
-            HeartbeatStatus::Error(e) => format!("错误（{e}）"),
+            HeartbeatStatus::Off => "Off".to_string(),
+            HeartbeatStatus::Running => "Running".to_string(),
+            HeartbeatStatus::Error(e) => format!("Error ({e})"),
         }
     }
 }

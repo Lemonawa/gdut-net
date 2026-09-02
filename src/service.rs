@@ -51,18 +51,18 @@ mod win {
         let password = if password_stdin {
             read_stdin_password()?
         } else {
-            rpassword::prompt_password("请输入密码: ")?
+            rpassword::prompt_password("Enter password: ")?
         };
         if password.is_empty() {
-            bail!("密码不能为空");
+            bail!("Password must not be empty");
         }
         if cfg.account.student_id.trim().is_empty() {
-            cfg.account.student_id = prompt_nonempty("请输入学号: ")?;
+            cfg.account.student_id = prompt_nonempty("Enter student ID: ")?;
         }
         // 存量配置迁移：旧版 http_probe_url=9.9.9.9 被校园网墙，自动升级为 223.5.5.5
         if cfg.dial.http_probe_url == "http://9.9.9.9" {
             cfg.dial.http_probe_url = "http://223.5.5.5".into();
-            log::info!("已自动迁移 http_probe_url: 9.9.9.9 → 223.5.5.5");
+            log::info!("Auto-migrated http_probe_url: 9.9.9.9 -> 223.5.5.5");
         }
         cfg.account.password_blob = crate::crypto::protect(&password)?;
         cfg.save(cfg_path)?;
@@ -71,7 +71,7 @@ mod win {
         let pbk_path = PathBuf::from(&cfg.dial.pbk_path);
         if let Some(parent) = pbk_path.parent() {
             std::fs::create_dir_all(parent)
-                .with_context(|| format!("创建目录失败: {}", parent.display()))?;
+                .with_context(|| format!("Failed to create directory: {}", parent.display()))?;
         }
 
         crate::ras::ensure_entry(&cfg.dial.pbk_path, &cfg.dial.entry_name)?;
@@ -86,22 +86,22 @@ mod win {
         set_recovery_actions()?;
         eventlog::register_source()?;
 
-        println!("安装完成：");
-        println!("  服务名: {SERVICE_NAME}（自启动，失败自动重启 5s/30s/60s）");
-        println!("  配置: {}", cfg_path.display());
+        println!("Install complete:");
+        println!("  Service: {SERVICE_NAME} (auto-start, restart on failure 5s/30s/60s)");
+        println!("  Config: {}", cfg_path.display());
         println!(
-            "  拨号条目: {}（{}）",
+            "  Dial entry: {} ({})",
             cfg.dial.entry_name, cfg.dial.pbk_path
         );
-        println!("启动服务: net start {SERVICE_NAME}");
-        println!("注意: 重装修改密码后需 net stop {SERVICE_NAME} && net start {SERVICE_NAME} 生效");
+        println!("Start service: net start {SERVICE_NAME}");
+        println!("Note: after reinstall with new password, run net stop {SERVICE_NAME} && net start {SERVICE_NAME} to apply");
         Ok(())
     }
 
     /// uninstall 入口（`gdut-net uninstall [--purge]`）；每步幂等宽容。
     pub fn uninstall(cfg_path: &Path, purge: bool) -> Result<()> {
         let manager = ServiceManager::local_computer(None::<&str>, ServiceManagerAccess::CONNECT)
-            .context("连接服务管理器失败（需要管理员权限）")?;
+            .context("Failed to connect to service manager (administrator required)")?;
 
         let service_access =
             ServiceAccess::QUERY_STATUS | ServiceAccess::STOP | ServiceAccess::DELETE;
@@ -110,40 +110,40 @@ mod win {
                 if service.query_status()?.current_state != ServiceState::Stopped {
                     // stop 失败不中断：wait_stopped 兜底判定真实状态。
                     if let Err(e) = service.stop() {
-                        log::warn!("服务 stop 请求失败（继续轮询状态）: {e}");
+                        log::warn!("Service stop request failed (polling status): {e}");
                     }
                     wait_stopped(&service)?;
                 }
-                service.delete().context("删除服务失败")?;
-                println!("服务已删除");
+                service.delete().context("Failed to delete service")?;
+                println!("Service removed");
             }
-            // 仅"服务不存在"属幂等场景；拒绝访问等真实错误照常上抛。
+            // 仅"Service not found"属幂等场景；拒绝访问等真实错误照常上抛。
             Err(windows_service::Error::Winapi(e))
                 if e.raw_os_error() == Some(ERROR_SERVICE_DOES_NOT_EXIST.0 as i32) =>
             {
-                println!("服务不存在，跳过")
+                println!("Service not found, skipping")
             }
-            Err(e) => return Err(anyhow!("打开服务失败: {e}")),
+            Err(e) => return Err(anyhow!("Failed to open service: {e}")),
         }
 
         match eventlog::unregister_source() {
-            Ok(()) => println!("事件源已删除"),
-            Err(e) => eprintln!("删除事件源失败（忽略）: {e}"),
+            Ok(()) => println!("Event source removed"),
+            Err(e) => eprintln!("Failed to remove event source (ignored): {e}"),
         }
         match crate::crypto::delete_entropy() {
-            Ok(()) => println!("entropy 已删除"),
-            Err(e) => eprintln!("删除 entropy 失败（忽略）: {e}"),
+            Ok(()) => println!("Entropy removed"),
+            Err(e) => eprintln!("Failed to remove entropy (ignored): {e}"),
         }
 
         if purge {
             let dir = program_data_dir(cfg_path);
             ensure_purge_safe(&dir)?;
             match std::fs::remove_dir_all(&dir) {
-                Ok(()) => println!("已删除 {}", dir.display()),
+                Ok(()) => println!("Removed {}", dir.display()),
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                    println!("{} 不存在，跳过", dir.display())
+                    println!("{} not found, skipping", dir.display())
                 }
-                Err(e) => return Err(anyhow!("删除 {} 失败: {e}", dir.display())),
+                Err(e) => return Err(anyhow!("Failed to remove {}: {e}", dir.display())),
             }
         }
         Ok(())
@@ -161,7 +161,7 @@ mod win {
             return Ok(());
         }
         bail!(
-            "拒绝删除可疑目录 {}（目录名不是 gdut-net），请手动清理",
+            "Refusing to delete suspicious directory {} (not named gdut-net), please remove manually",
             dir.display()
         )
     }
@@ -169,7 +169,7 @@ mod win {
     /// 服务运行入口（`gdut-net run`）：先分发器，成功即阻塞至服务停止。
     pub fn service_main() -> Result<()> {
         service_dispatcher::start(SERVICE_NAME, ffi_service_main)
-            .context("服务分发器启动失败（应以服务方式运行）")
+            .context("Service dispatcher failed (must run as service)")
     }
 
     /// 服务真实主体：注册控制处理器 → Running → 跑运行时 → Stopped。
@@ -179,8 +179,8 @@ mod win {
         let code = match run_service() {
             Ok(()) => 0,
             Err(e) => {
-                eprintln!("gdut-net: 服务异常退出: {e:#}");
-                log::error!("服务异常退出: {e:#}");
+                eprintln!("gdut-net: service crashed: {e:#}");
+                log::error!("Service crashed: {e:#}");
                 // 非零码退出：让 SCM 的失败恢复动作（Restart 5s/30s/60s）接管。
                 1
             }
@@ -219,8 +219,8 @@ mod win {
         let cfg = match Config::load(&cfg_path) {
             Ok(cfg) => cfg,
             Err(e) => {
-                let ctx =
-                    anyhow::anyhow!(e).context(format!("加载配置失败: {}", cfg_path.display()));
+                let ctx = anyhow::anyhow!(e)
+                    .context(format!("Failed to load config: {}", cfg_path.display()));
                 eprintln!("gdut-net: {ctx:#}");
                 report_stopped(&status_handle)?;
                 return Err(ctx);
@@ -233,14 +233,14 @@ mod win {
         let log_guard = match crate::logging::init_service_logging(&cfg.log) {
             Ok(g) => g,
             Err(e) => {
-                eprintln!("gdut-net: 初始化文件日志失败: {e:#}");
+                eprintln!("gdut-net: failed to init file logging: {e:#}");
                 report_stopped(&status_handle)?;
-                return Err(e).context("初始化文件日志失败");
+                return Err(e).context("Failed to init file logging");
             }
         };
         std::mem::forget(log_guard);
         log::info!(
-            "gdut-net 服务启动（配置: {}，日志: {}）",
+            "gdut-net service started (config: {}, log dir: {})",
             cfg_path.display(),
             cfg.log.dir
         );
@@ -265,7 +265,7 @@ mod win {
                 0,
                 Duration::from_secs(0),
             ))
-            .context("上报 Stopped 状态失败")
+            .context("Failed to report Stopped status")
     }
 
     fn service_status(state: ServiceState, checkpoint: u32, wait_hint: Duration) -> ServiceStatus {
@@ -289,7 +289,7 @@ mod win {
         if unsafe { IsUserAnAdmin() }.as_bool() {
             Ok(())
         } else {
-            bail!("需要管理员权限：请以管理员身份运行 PowerShell/cmd 后重试")
+            bail!("Administrator required: run PowerShell/cmd as administrator and retry")
         }
     }
 
@@ -299,7 +299,7 @@ mod win {
         std::io::stdin()
             .lock()
             .read_line(&mut line)
-            .context("读取 stdin 密码失败")?;
+            .context("Failed to read password from stdin")?;
         Ok(line.trim_end_matches(['\r', '\n']).to_string())
     }
 
@@ -310,12 +310,12 @@ mod win {
             if !s.is_empty() {
                 return Ok(s);
             }
-            println!("输入不能为空，请重试");
+            println!("Input must not be empty, try again");
         }
     }
 
     fn service_binary() -> Result<PathBuf> {
-        std::env::current_exe().context("取当前可执行文件路径失败")
+        std::env::current_exe().context("Failed to get current executable path")
     }
 
     fn create_service(cfg_path: &Path) -> Result<()> {
@@ -323,11 +323,11 @@ mod win {
             None::<&str>,
             ServiceManagerAccess::CONNECT | ServiceManagerAccess::CREATE_SERVICE,
         )
-        .context("连接服务管理器失败（需要管理员权限）")?;
+        .context("Failed to connect to service manager (administrator required)")?;
 
         let info = ServiceInfo {
             name: OsString::from(SERVICE_NAME),
-            display_name: OsString::from("GDUT 有线网认证客户端"),
+            display_name: OsString::from("GDUT Wired Network Client"),
             service_type: ServiceType::OWN_PROCESS,
             start_type: ServiceStartType::AutoStart,
             error_control: ServiceErrorControl::Normal,
@@ -352,7 +352,7 @@ mod win {
                         SERVICE_NAME,
                         ServiceAccess::CHANGE_CONFIG | ServiceAccess::QUERY_STATUS,
                     )
-                    .context("服务已存在，但打开失败")?;
+                    .context("Service already exists, failed to open")?;
                 let _ = existing.stop();
                 for _ in 0..20 {
                     if existing.query_status()?.current_state == ServiceState::Stopped {
@@ -362,10 +362,10 @@ mod win {
                 }
                 existing
                     .change_config(&info)
-                    .context("服务已存在，但更新配置失败")?;
-                println!("服务已存在，已刷新配置");
+                    .context("Service already exists, failed to update config")?;
+                println!("Service already exists, config refreshed");
             }
-            Err(e) => return Err(anyhow!("创建服务失败: {e}")),
+            Err(e) => return Err(anyhow!("Failed to create service: {e}")),
         }
         Ok(())
     }
@@ -404,7 +404,7 @@ mod win {
                 return Ok(());
             }
             if start.elapsed() >= STOP_TIMEOUT {
-                bail!("等待服务停止超时（10s）；服务可能已标记删除，重启后生效");
+                bail!("Timed out waiting for service to stop (10s); service may be marked for deletion, will take effect after reboot");
             }
             sleep(Duration::from_millis(500));
         }
