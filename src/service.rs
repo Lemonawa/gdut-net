@@ -83,8 +83,14 @@ mod win {
         )?;
 
         create_service(cfg_path).context("Failed to create/update service")?;
-        set_recovery_actions().context("Failed to set service recovery actions")?;
-        eventlog::register_source().context("Failed to register event source")?;
+        if let Err(e) = set_recovery_actions() {
+            eprintln!("Warning: failed to set service recovery actions (ignored, service still usable): {e:#}");
+            log::warn!("Failed to set service recovery actions (ignored): {e:#}");
+        }
+        if let Err(e) = eventlog::register_source() {
+            eprintln!("Warning: failed to register event source (ignored): {e:#}");
+            log::warn!("Failed to register event source (ignored): {e:#}");
+        }
 
         println!("Install complete:");
         println!("  Service: {SERVICE_NAME} (auto-start, restart on failure 5s/30s/60s)");
