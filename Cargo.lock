@@ -1098,6 +1098,7 @@ dependencies = [
  "tray-icon",
  "windows",
  "windows-service",
+ "winit",
 ]
 
 [[package]]

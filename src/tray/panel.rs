@@ -54,13 +54,20 @@ pub fn show(snapshot: SharedSnapshot, redial_tx: Sender<()>) {
 }
 
 fn run(snapshot: SharedSnapshot, redial_tx: Sender<()>) -> Result<()> {
-    let options = eframe::NativeOptions {
+    let mut options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("gdut-net Status")
             .with_inner_size(egui::vec2(380.0, 250.0))
             .with_resizable(false),
         ..Default::default()
     };
+    #[cfg(windows)]
+    {
+        options.event_loop_builder = Some(Box::new(|builder| {
+            use winit::platform::windows::EventLoopBuilderExtWindows as _;
+            builder.with_any_thread(true);
+        }));
+    }
     eframe::run_native(
         "gdut-net-panel",
         options,
