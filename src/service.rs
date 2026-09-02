@@ -82,9 +82,9 @@ mod win {
             &password,
         )?;
 
-        create_service(cfg_path)?;
-        set_recovery_actions()?;
-        eventlog::register_source()?;
+        create_service(cfg_path).context("Failed to create/update service")?;
+        set_recovery_actions().context("Failed to set service recovery actions")?;
+        eventlog::register_source().context("Failed to register event source")?;
 
         println!("Install complete:");
         println!("  Service: {SERVICE_NAME} (auto-start, restart on failure 5s/30s/60s)");
@@ -373,8 +373,11 @@ mod win {
     /// 3 段失败恢复：Restart 5s/30s/60s，失败计数 24h 后清零。
     /// windows-service 0.8 已封装 ChangeServiceConfig2W（update_failure_actions）。
     fn set_recovery_actions() -> Result<()> {
-        let manager = ServiceManager::local_computer(None::<&str>, ServiceManagerAccess::CONNECT)?;
-        let service = manager.open_service(SERVICE_NAME, ServiceAccess::CHANGE_CONFIG)?;
+        let manager = ServiceManager::local_computer(None::<&str>, ServiceManagerAccess::CONNECT)
+            .context("Failed to connect to service manager")?;
+        let service = manager
+            .open_service(SERVICE_NAME, ServiceAccess::CHANGE_CONFIG)
+            .context("Failed to open service for CHANGE_CONFIG")?;
         service.update_failure_actions(ServiceFailureActions {
             reset_period: ServiceFailureResetPeriod::After(Duration::from_secs(RESET_PERIOD_SECS)),
             reboot_msg: None,
@@ -393,7 +396,8 @@ mod win {
                     delay: Duration::from_secs(60),
                 },
             ]),
-        })?;
+        })
+        .context("Failed to update service failure actions")?;
         Ok(())
     }
 
