@@ -58,7 +58,10 @@ fn run(snapshot: SharedSnapshot, redial_tx: Sender<()>) -> Result<()> {
         viewport: egui::ViewportBuilder::default()
             .with_title("gdut-net Status")
             .with_inner_size(egui::vec2(380.0, 250.0))
-            .with_resizable(false),
+            .with_resizable(false)
+            .with_transparent(false)
+            .with_decorations(true),
+        renderer: eframe::Renderer::Wgpu,
         ..Default::default()
     };
     #[cfg(windows)]
@@ -71,7 +74,8 @@ fn run(snapshot: SharedSnapshot, redial_tx: Sender<()>) -> Result<()> {
     eframe::run_native(
         "gdut-net-panel",
         options,
-        Box::new(move |_cc| {
+        Box::new(move |cc| {
+            cc.egui_ctx.set_visuals(egui::Visuals::light());
             Ok(Box::new(Panel {
                 snapshot,
                 redial_tx,
@@ -98,7 +102,11 @@ impl eframe::App for Panel {
         *PANEL_CTX.lock().expect("PANEL_CTX poisoned") = Some(ui.ctx().clone());
 
         egui::CentralPanel::default()
-            .frame(egui::Frame::default().inner_margin(egui::Margin::same(14)))
+            .frame(
+                egui::Frame::default()
+                    .fill(egui::Color32::from_rgb(245, 245, 245))
+                    .inner_margin(egui::Margin::same(14)),
+            )
             .show(ui, |ui| {
                 ui.heading("gdut-net Status");
                 ui.add_space(10.0);

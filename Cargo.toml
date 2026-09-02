@@ -53,7 +53,7 @@ windows = { version = "0.62", features = [
 windows-service = "0.8"
 tauri-winrt-notification = "0.8"
 tray-icon = "0.24"
-eframe = { version = "0.36", default-features = false, features = ["glow"] }
+eframe = { version = "0.36", default-features = false, features = ["glow", "wgpu"] }
 
 [profile.release]
 opt-level = "z"

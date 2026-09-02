@@ -91,6 +91,13 @@ mod win {
             eprintln!("Warning: failed to register event source (ignored): {e:#}");
             log::warn!("Failed to register event source (ignored): {e:#}");
         }
+        // 托盘自启（HKCU Run，无需管理员，失败仅警告）
+        if let Err(e) = crate::tray::register_autostart() {
+            eprintln!("Warning: failed to register tray autostart (ignored): {e:#}");
+            log::warn!("Failed to register tray autostart (ignored): {e:#}");
+        } else {
+            println!("Tray autostart: HKCU\\...\\Run\\gdut-net-tray");
+        }
 
         println!("Install complete:");
         println!("  Service: {SERVICE_NAME} (auto-start, restart on failure 5s/30s/60s)");
@@ -139,6 +146,10 @@ mod win {
         match crate::crypto::delete_entropy() {
             Ok(()) => println!("Entropy removed"),
             Err(e) => eprintln!("Failed to remove entropy (ignored): {e}"),
+        }
+        match crate::tray::unregister_autostart() {
+            Ok(()) => println!("Tray autostart removed"),
+            Err(e) => eprintln!("Failed to remove tray autostart (ignored): {e}"),
         }
 
         if purge {
