@@ -161,17 +161,37 @@ mod win {
                 code: code @ (756 | 813),
                 ..
             }) => {
-                log::warn!("Dial {code} (stale session present), hanging up enumerated session and retrying once");
-                if let Some(h) = find_entry_connection(pbk, name) {
-                    unsafe {
-                        let _ = RasHangUpW(h);
-                    }
-                    sleep(Duration::from_millis(500));
+                log::warn!("Dial {code} (stale session present), hanging up all PPPoE sessions and retrying");
+                let hung = hangup_all_ppp(pbk, name);
+                if hung == 0 {
+                    log::warn!("Dial {code} but no enumerated session found, still retrying after 1s");
                 }
+                sleep(Duration::from_millis(1500));
                 dial_once(pbk, name, user, pass)
             }
             other => other,
         }
+    }
+
+    /// 挂断所有已枚举的 PPPoE 会话（756/813 抢占场景），返回挂断数。
+    fn hangup_all_ppp(pbk: &str, name: &str) -> usize {
+        let mut count = 0;
+        // 先尝试精确匹配的 gdut 条目，再兜底任意 PPPoE，循环挂断直到枚举为空
+        // （避免单次 hangup 后仍有残留导致二次 756）
+        for _ in 0..4 {
+            let Some(h) = find_entry_connection(pbk, name) else {
+                break;
+            };
+            unsafe {
+                let _ = RasHangUpW(h);
+            }
+            count += 1;
+            sleep(Duration::from_millis(400));
+        }
+        if count > 0 {
+            log::info!("Hung up {count} stale PPPoE session(s) for 756/813 recovery");
+        }
+        count
     }
 
     fn dial_once(pbk: &str, name: &str, user: &str, pass: &str) -> Result<RasSession, RasError> {
