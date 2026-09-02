@@ -32,7 +32,6 @@ socket2 = "0.6"
 tokio-util = "0.7"
 
 [target.'cfg(windows)'.dependencies]
-winit = { version = "0.30", default-features = false }
 windows = { version = "0.62", features = [
   "Win32_Foundation",
   "Win32_NetworkManagement_Rras",
@@ -53,7 +52,6 @@ windows = { version = "0.62", features = [
 windows-service = "0.8"
 tauri-winrt-notification = "0.8"
 tray-icon = "0.24"
-eframe = { version = "0.36", default-features = false, features = ["glow", "wgpu"] }
 
 [profile.release]
 opt-level = "z"
