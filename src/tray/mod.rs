@@ -229,8 +229,17 @@ fn ipc_loop(snapshot: SharedSnapshot, status_tx: mpsc::Sender<String>) {
         }
     };
 
+    // 托盘线程无全局 runtime，NamedPipeClient::open 要求 Handle::current()
+    // 必须在 runtime 上下文内（tokio-1.53 named_pipe.rs:1005）。整条 IPC
+    // 回路复用同一个 current_thread runtime，避免每次建 runtime 且让
+    // PipeClient::connect 的 std::thread::sleep 不阻塞全局。
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("Failed to create tray IPC runtime");
+
     loop {
-        let mut client = match PipeClient::connect() {
+        let mut client = match rt.block_on(async { PipeClient::connect() }) {
             Ok(c) => c,
             Err(e) => {
                 log::debug!("Tray failed to connect to service (retrying): {e:#}");
@@ -240,7 +249,7 @@ fn ipc_loop(snapshot: SharedSnapshot, status_tx: mpsc::Sender<String>) {
         };
 
         loop {
-            let state = match block_on_next_state(&mut client) {
+            let state = match rt.block_on(client.next_state()) {
                 Ok(s) => s,
                 Err(e) => {
                     log::debug!("Tray status stream disconnected (service stopped?): {e:#}");
@@ -263,15 +272,6 @@ fn ipc_loop(snapshot: SharedSnapshot, status_tx: mpsc::Sender<String>) {
         push_text(&snapshot);
         std::thread::sleep(CONNECT_RETRY);
     }
-}
-
-/// 包装 `PipeClient::next_state`：每次调用自建 current_thread runtime
-/// 同步驱动（托盘线程无全局 executor）。
-fn block_on_next_state(client: &mut PipeClient) -> Result<StateSnapshot> {
-    tokio::runtime::Builder::new_current_thread()
-        .build()
-        .context("Failed to create tray runtime")?
-        .block_on(client.next_state())
 }
 
 /// 跑一拍 win32 消息泵。返回 true 表示处理了至少一条消息。
