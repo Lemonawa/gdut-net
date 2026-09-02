@@ -16,7 +16,7 @@ pub struct Cli {
     )]
     pub config: std::path::PathBuf,
 
-    /// install 时从 stdin 读密码（非交互，适合脚本）
+    /// Read password from stdin for install (non-interactive, for scripts)
     #[arg(long, requires = "cmd", global = true)]
     pub password_stdin: bool,
 
@@ -26,39 +26,36 @@ pub struct Cli {
 
 #[derive(Subcommand)]
 pub enum Cmd {
-    /// 以 Windows 服务方式运行（内部使用）
+    /// Run as Windows service (internal)
     Run,
-    /// 安装服务、创建拨号条目、写配置
+    /// Install service, create dial entry, write config
     Install,
-    /// 卸载并清理
+    /// Uninstall and clean up
     Uninstall {
-        /// 同时删除 ProgramData 下的配置与日志
+        /// Also remove config and logs under ProgramData
         #[arg(long)]
         purge: bool,
     },
-    /// 显示当前状态
+    /// Show current status
     Status,
-    /// 启动托盘（用户会话）
+    /// Start tray (user session)
     Tray,
 }
 
 pub fn dispatch() -> Result<()> {
+    // Set UTF-8 code page before clap parses --help (clap prints and exits
+    // before we reach later init; default GBK would garble UTF-8 help text).
+    #[cfg(windows)]
+    unsafe {
+        let _ = windows::Win32::System::Console::SetConsoleOutputCP(65001);
+        let _ = windows::Win32::System::Console::SetConsoleCP(65001);
+    }
     let cli = Cli::parse();
-    // Run 分支（服务分发器）不装 CLI 日志：真实日志由 run_service 拿到
-    // 配置后按 LogCfg 初始化文件滚动日志（crate::logging::init_service_logging）；
-    // 其余子命令（install/uninstall/status/tray）info 级 stderr 即可。
+    // Run branch (service dispatcher) does not install CLI logger: real
+    // logger is init after loading config via init_service_logging; other
+    // subcommands (install/uninstall/status/tray) use info-level stderr.
     if !matches!(cli.cmd, Cmd::Run) {
         crate::logging::init_cli_logging();
-    }
-    // Windows 控制台默认代码页 GBK，而我们的字符串字面量是 UTF-8，
-    // 不设 65001 会输出乱码（如"Please enter password?"）。服务分支无需控制台。
-    #[cfg(windows)]
-    if !matches!(cli.cmd, Cmd::Run) {
-        unsafe {
-            // 失败静默：终端不支持 65001 时维持现状，好过中断。
-            let _ = windows::Win32::System::Console::SetConsoleOutputCP(65001);
-            let _ = windows::Win32::System::Console::SetConsoleCP(65001);
-        }
     }
     match cli.cmd {
         #[cfg(windows)]
