@@ -143,6 +143,10 @@ CI（`.github/workflows/ci.yml`）：`linux-test`（test + clippy + fmt）、`wi
 
 架构与领域词汇见 [CONTEXT.md](CONTEXT.md)；设计决策见 [docs/adr/](docs/adr/)（心跳变体取舍 ADR-0002、两级掉线探测 ADR-0003、服务/托盘分进程 ADR-0001、托盘图标技术选型 ADR-0004）。
 
+## 桌面工具包
+
+Windows 机器 `Desktop/gdut-net` 文件夹的操作手册（文件清单、一键回家/回校、代理/TUN 铁律、部署与回滚）：见 [docs/desktop-kit.md](docs/desktop-kit.md)。
+
 ## License
 
 仅供学习交流，未含任何官方客户端代码；Dr.COM 协议细节来自社区逆向成果。
