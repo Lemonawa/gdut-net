@@ -107,7 +107,10 @@ pub fn register_autostart() -> Result<()> {
     let exe = std::env::current_exe().context("Failed to get exe path")?;
     let value = format!("\"{}\" tray", exe.display());
     let subkey_w: Vec<u16> = RUN_KEY.encode_utf16().chain(std::iter::once(0)).collect();
-    let name_w: Vec<u16> = "gdut-net-tray".encode_utf16().chain(std::iter::once(0)).collect();
+    let name_w: Vec<u16> = "gdut-net-tray"
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .collect();
     let value_w: Vec<u16> = value.encode_utf16().chain(std::iter::once(0)).collect();
     let value_bytes: Vec<u8> = value_w.iter().flat_map(|c| c.to_le_bytes()).collect();
     let mut hkey = HKEY::default();
@@ -147,9 +150,20 @@ pub fn unregister_autostart() -> Result<()> {
     use windows::Win32::System::Registry::{RegDeleteValueW, RegOpenKeyExW, KEY_SET_VALUE};
     const RUN_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Run";
     let subkey_w: Vec<u16> = RUN_KEY.encode_utf16().chain(std::iter::once(0)).collect();
-    let name_w: Vec<u16> = "gdut-net-tray".encode_utf16().chain(std::iter::once(0)).collect();
+    let name_w: Vec<u16> = "gdut-net-tray"
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .collect();
     let mut hkey = HKEY::default();
-    let ret = unsafe { RegOpenKeyExW(HKEY_CURRENT_USER, PCWSTR(subkey_w.as_ptr()), None, KEY_SET_VALUE, &mut hkey) };
+    let ret = unsafe {
+        RegOpenKeyExW(
+            HKEY_CURRENT_USER,
+            PCWSTR(subkey_w.as_ptr()),
+            None,
+            KEY_SET_VALUE,
+            &mut hkey,
+        )
+    };
     if ret != ERROR_SUCCESS {
         return Ok(());
     }

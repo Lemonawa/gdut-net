@@ -58,7 +58,14 @@ _Avoid_: 保活模式
 用户会话内的常驻 UI 进程，展示会话状态并在守护异常时弹系统通知；与服务 IPC，不参与拨号。
 _Avoid_: 界面（泛称）
 
+**双出口 (Dual Egress)**:
+校园网同时存在 DHCP 物理口（172.17.x.x，默认路由 metric 0）与 PPP 会话口（`gdut`，10.30.x.x，metric 1）；两者隔离，互联网出站必须走 PPP，家中单出口无此问题。
+
 ## Rules
 
 - 心跳相关的一切发包绑定物理适配器，绑定失败（端口 61440 被官方客户端占用）视为兼容模式不可用，报错而非静默。
 - "掉线"以流量探测为准，不单看 RAS 状态。
+- 双出口下 TUN/代理出站必须显式绑 `gdut`（Mihomo `interface-name: gdut`；`auto-detect-interface` 会跟 metric 0 的物理口走，被墙），TUN MTU≤1400（PPPoE 1480 减开销）。
+- WSL 为 mirror 模式，跟随主机路由表；TUN 开 fake-ip 时直连失败是预期，只能走 TUN/代理。
+- 查系统代理只信注册表 `HKCU\...\Internet Settings\ProxyEnable`，不信 GUI 开关（前后端脱节）；该值重启不清零；FlClashHelperService（SYSTEM 常驻，FlClash 关了也可能活着）会把它写回 1；Verge 守卫在 OFF 时已停可排除；`clash-verge-service` 不是 SCM 服务（sc 1060），只跑内核不管代理。
+- Verge 运行时配置注入点是 `profiles/Merge.yaml`（全局拓展配置），别手改生成的 `clash-verge.yaml`；回滚=删段后重选订阅。

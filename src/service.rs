@@ -395,26 +395,29 @@ mod win {
         let service = manager
             .open_service(SERVICE_NAME, ServiceAccess::CHANGE_CONFIG)
             .context("Failed to open service for CHANGE_CONFIG")?;
-        service.update_failure_actions(ServiceFailureActions {
-            reset_period: ServiceFailureResetPeriod::After(Duration::from_secs(RESET_PERIOD_SECS)),
-            reboot_msg: None,
-            command: None,
-            actions: Some(vec![
-                ServiceAction {
-                    action_type: ServiceActionType::Restart,
-                    delay: Duration::from_secs(5),
-                },
-                ServiceAction {
-                    action_type: ServiceActionType::Restart,
-                    delay: Duration::from_secs(30),
-                },
-                ServiceAction {
-                    action_type: ServiceActionType::Restart,
-                    delay: Duration::from_secs(60),
-                },
-            ]),
-        })
-        .context("Failed to update service failure actions")?;
+        service
+            .update_failure_actions(ServiceFailureActions {
+                reset_period: ServiceFailureResetPeriod::After(Duration::from_secs(
+                    RESET_PERIOD_SECS,
+                )),
+                reboot_msg: None,
+                command: None,
+                actions: Some(vec![
+                    ServiceAction {
+                        action_type: ServiceActionType::Restart,
+                        delay: Duration::from_secs(5),
+                    },
+                    ServiceAction {
+                        action_type: ServiceActionType::Restart,
+                        delay: Duration::from_secs(30),
+                    },
+                    ServiceAction {
+                        action_type: ServiceActionType::Restart,
+                        delay: Duration::from_secs(60),
+                    },
+                ]),
+            })
+            .context("Failed to update service failure actions")?;
         Ok(())
     }
 

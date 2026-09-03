@@ -45,4 +45,10 @@ CI：`linux-test`（test/clippy/fmt）+ `windows-build`（test --release/clippy 
 - `switch-v4.ps1` 成功检测搜英文 `Dial succeeded` / `dropped`，中文匹配永不命中（英文化后遗留坑）。
 - `service` 停止后进程可能残留致重装 `1073`，`service_run` 显式 `std::process::exit` 兜底；`install` 已幂等（`1073` → `change_config`）。
 - `probe` 的 `http_probe_url` 仅接受 `http://`+IPv4 字面量（`parse_http_probe_target` 单实现复用），`9.9.9.9` 被校园网墙，默认 `223.5.5.5`；`gateway 0.0.0.0` 时 ICMP 退化为 `223.5.5.5`。
+- 校园网 DHCP 口与 PPP 口隔离：物理口默认路由 metric 0 优先于 PPP（metric 1），TUN 类软件 `auto-detect-interface` 会把代理出站绑到物理口被墙——须指定 `interface-name=gdut` 走 PPP，且 TUN MTU≤1400（PPPoE 1480 减开销），否则 WSL（mirror 模式跟随主机路由）开 TUN 即断网，家中单出口无此问题。
 - `UAC ConsentPromptBehaviorAdmin=0 + EnableLUA=1` 会让 `Start-Process -Verb RunAs` 静默失败；免 UAC 一键切换靠计划任务 `gdut-switch`（`SYSTEM`，`AllowStartIfOnBatteries`，10min 超时），触发 `schtasks /Run /TN gdut-switch`。
+- WSL 里 `powershell.exe` 不在 PATH，调 Windows 侧走绝对路径：WinPS 5.1 用 `/mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe`，ps7（应用商店版）在 `/mnt/c/Users/Lemonawa/AppData/Local/Microsoft/WindowsApps/pwsh.exe`；读注册表/查自启动只读操作可直接跑。
+- `ProxyEnable` 存 HKCU 重启不清零；重启后代理是否翻回只看自启动项（`HKCU/HKLM\...\Run` 应无 FlClash/Verge/clash 系），验证一行：`(Get-ItemProperty 'HKCU:\...\Internet Settings').ProxyEnable` 为 0 即关着；回写是事件驱动（FlClash HelperService 定时写回，GUI 开关脱节），高频轮询定格翻转时刻再对日志找触发动作。
+- 命名管道默认 DACL 会拒绝用户会话：服务（SYSTEM/Session 0）建管必须挂 SDDL（`D:(A;;GRGW;;;AU)`，经 `create_with_security_attributes_raw`），否则托盘/`status` 报 `os error 5` 拒绝访问；改动只在服务重启后生效。
+- 桌面 `gdut-net` 文件夹只留：`gdut-net.exe`、`gdut-net-bak.exe`（回滚件）、`switch-v4.ps1`+`switch-v4.log`、`一键切换.bat`、`tray.bat`、`status.bat`、`proxy-check.bat`；`switch-v4.ps1` A0 只从 `gdut-net-new.exe` 部署（旧 zip 流已退役，其构建早于管道 DACL/MessageBox 修复）；`pw.txt` 用后即删（`switch-v4` 下次运行会重建），明文密码不落盘。
+- 给用户的断网窗口操作必须自带回滚块（能独立执行、不写“报给我”），网络炸了用户侧无 AI 可达。

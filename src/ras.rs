@@ -164,7 +164,9 @@ mod win {
                 log::warn!("Dial {code} (stale session present), hanging up all PPPoE sessions and retrying");
                 let hung = hangup_all_ppp(pbk, name);
                 if hung == 0 {
-                    log::warn!("Dial {code} but no enumerated session found, still retrying after 1s");
+                    log::warn!(
+                        "Dial {code} but no enumerated session found, still retrying after 1s"
+                    );
                 }
                 sleep(Duration::from_millis(1500));
                 dial_once(pbk, name, user, pass)

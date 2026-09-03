@@ -30,15 +30,25 @@ pub fn show(snapshot: SharedSnapshot, redial_tx: Sender<()>) {
     let body = format!("{text}\n\nRedial now?");
     #[cfg(windows)]
     {
-        let wide = |s: &str| s.encode_utf16().chain(std::iter::once(0)).collect::<Vec<u16>>();
+        let wide = |s: &str| {
+            s.encode_utf16()
+                .chain(std::iter::once(0))
+                .collect::<Vec<u16>>()
+        };
         let title = wide("gdut-net Status");
         let msg = wide(&body);
-        let ret = unsafe { MessageBoxW(None, PCWSTR(msg.as_ptr()), PCWSTR(title.as_ptr()), MB_YESNO | MB_ICONINFORMATION) };
+        let ret = unsafe {
+            MessageBoxW(
+                None,
+                PCWSTR(msg.as_ptr()),
+                PCWSTR(title.as_ptr()),
+                MB_YESNO | MB_ICONINFORMATION,
+            )
+        };
         // IDYES = 6
         if ret.0 == 6 {
             let _ = redial_tx.send(());
         }
-        return;
     }
     #[cfg(not(windows))]
     {
@@ -46,5 +56,3 @@ pub fn show(snapshot: SharedSnapshot, redial_tx: Sender<()>) {
         let _ = redial_tx;
     }
 }
-
-
