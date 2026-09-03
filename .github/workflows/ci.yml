@@ -1,4 +1,4 @@
-name: CI
+name: ci
 
 on:
   push:
@@ -10,75 +10,31 @@ env:
 
 jobs:
   linux-test:
-    name: 测试与静态检查 (Linux)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-
-      - name: 安装 Rust 工具链
-        uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
         with:
-          components: rustfmt, clippy
-
-      - name: 缓存 cargo
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-cargo-
-
-      - name: cargo test
-        run: cargo test
-
-      - name: cargo clippy
-        run: cargo clippy -- -D warnings
-
-      - name: cargo fmt
-        run: cargo fmt --check
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test
+      - run: cargo clippy -- -D warnings
+      - run: cargo fmt --check
 
   windows-build:
-    name: 测试与构建产物 (Windows)
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
-
-      - name: 安装 Rust 工具链
-        uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
         with:
-          components: clippy
-
-      - name: 缓存 cargo
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-cargo-
-
-      - name: cargo test
-        run: cargo test --release
-
-      - name: cargo clippy
-        run: cargo clippy --all-targets -- -D warnings
-
-      - name: cargo build --release
-        run: cargo build --release
-
-      - name: 打包发布产物
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --release
+      - run: cargo clippy --all-targets -- -D warnings
+      - run: cargo build --release
+      - run: Compress-Archive -Path target/release/gdut-net.exe -DestinationPath gdut-net-x86_64.zip
         shell: pwsh
-        run: |
-          New-Item -ItemType Directory -Force -Path dist | Out-Null
-          Copy-Item target/release/gdut-net.exe dist/
-          Compress-Archive -Path dist/gdut-net.exe -DestinationPath gdut-net-x86_64.zip -Force
-          Get-Item gdut-net-x86_64.zip | Select-Object Name, Length
-
-      - name: 上传产物
-        uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: gdut-net-x86_64
           path: gdut-net-x86_64.zip
