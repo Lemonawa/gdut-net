@@ -51,4 +51,9 @@ CI：`linux-test`（test/clippy/fmt）+ `windows-build`（test --release/clippy 
 - `ProxyEnable` 存 HKCU 重启不清零；重启后代理是否翻回只看自启动项（`HKCU/HKLM\...\Run` 应无 FlClash/Verge/clash 系），验证一行：`(Get-ItemProperty 'HKCU:\...\Internet Settings').ProxyEnable` 为 0 即关着；回写是事件驱动（FlClash HelperService 定时写回，GUI 开关脱节），高频轮询定格翻转时刻再对日志找触发动作。
 - 命名管道默认 DACL 会拒绝用户会话：服务（SYSTEM/Session 0）建管必须挂 SDDL（`D:(A;;GRGW;;;AU)`，经 `create_with_security_attributes_raw`），否则托盘/`status` 报 `os error 5` 拒绝访问；改动只在服务重启后生效。
 - 桌面 `gdut-net` 文件夹只留：`gdut-net.exe`、`gdut-net-bak.exe`（回滚件）、`switch-v4.ps1`+`switch-v4.log`、`一键切换.bat`、`tray.bat`、`status.bat`、`proxy-check.bat`；`switch-v4.ps1` A0 只从 `gdut-net-new.exe` 部署（旧 zip 流已退役，其构建早于管道 DACL/MessageBox 修复）；`pw.txt` 用后即删（`switch-v4` 下次运行会重建），明文密码不落盘。
+- Verge 代理三件套排障（2026-09-03 实战）：`ProxyEnable` 翻回先查 `Connections\gdut` blob（flags 字节 bit1=专属代理，曾存旧 7890）+ `MigrateProxy` 置 0，胜过杀进程（FlClash/Verge 守卫/7348 全是无辜的，审计抓到 svchost 只是搬运工）；决断用注册表审计（中文系统 auditpol 子类别叫“注册表”）+ `Get-WinEvent ID=4657` 看进程名。
+- Verge 改配置（Merge.yaml）必须**完整重启 Verge**（托盘 Quit）才合并，光重启内核不吃；TUN 开关灯看 `Get-NetAdapter Mihomo` + `0.0.0.0/0 metric 0` 路由在不在。
+- fake-ip 在“频繁重启内核+系统 DNS 缓存”下必死（旧映射进缓存即 RST），直接 `enhanced-mode: redir-host`（真 IP 转发已验证通）；国外慢先换节点再怪内核（固定 5.1s×N 次=节点晚高峰，换节点即变脸）。
+- TUN 开关杀死长连接（2026-09-03 四路会诊定案）：TCP 无迁移，TUN 默认路由一切换，opencode 的 SSE 长连接静默死亡（哑巴、不报错）；`lma.moe→DIRECT` 规则本身无罪（位置/合并/嗅探全对）。规矩：拨 TUN 开关必重启 opencode 进程；判新老用 `curl ai.lma.moe/v1/models`（401=新连接活）。
+- Tailscale 对家（nimbus-2000）不能直连（2026-09-04 定案，全案 `docs/tailscale-p2p.md`）：校园 PPP CGNAT=对称 NAT+重写端口（41641→随机）+多 ISP 池（120.236=移动/58.248=电信），家路由器按远端过滤——双向洞包全灭，只能 DERP(den) 440ms。校园侧无解也不需改动；修复=家路由器开 UPnP 或转发 UDP 41641→192.168.5.11。Mac 侧 Surge/utun 无辜（tailscaled 绑 en0）；SG VPS 可直连（197ms）即「我方先手+对端回源」机制完好的证据。
 - 给用户的断网窗口操作必须自带回滚块（能独立执行、不写“报给我”），网络炸了用户侧无 AI 可达。
