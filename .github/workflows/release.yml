@@ -1,0 +1,28 @@
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+
+env:
+  CARGO_TERM_COLOR: always
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --release
+      - run: cargo clippy --all-targets -- -D warnings
+      - run: cargo build --release
+      - run: Compress-Archive -Path target/release/gdut-net.exe -DestinationPath gdut-net-x86_64.zip
+        shell: pwsh
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: gdut-net-x86_64.zip
+          generate_release_notes: true
