@@ -7,7 +7,7 @@ use windows::Win32::Foundation::HANDLE;
 use windows::Win32::NetworkManagement::WiFi::{
     dot11_BSS_type_infrastructure, wlan_connection_mode_profile, wlan_interface_state_connected,
     WlanCloseHandle, WlanConnect, WlanDisconnect, WlanEnumInterfaces, WlanFreeMemory,
-    WlanOpenHandle, WLAN_CONNECTION_PARAMETERS, WLAN_INTERFACE_INFO_LIST, WLAN_INTERFACE_STATE,
+    WlanOpenHandle, WLAN_CONNECTION_PARAMETERS, WLAN_INTERFACE_INFO_LIST,
 };
 
 const CLIENT_VERSION: u32 = 2; // WLAN_CLIENT_VERSION_LONGHORN（Vista+）
@@ -117,15 +117,14 @@ pub fn associated() -> bool {
         if err != 0 {
             return Ok(false);
         }
-        let n = unsafe { (*list).dwNumberOfItems };
-        let mut hit = false;
-        for i in 0..n as usize {
-            let state: WLAN_INTERFACE_STATE = unsafe { (*list).InterfaceInfo[i].isState };
-            if state == wlan_interface_state_connected {
-                hit = true;
-                break;
-            }
-        }
+        let n = unsafe { (*list).dwNumberOfItems } as usize;
+        // InterfaceInfo 在结构体里声明为 [..; 1]，实际是变长尾数组：
+        // 直接下标访问在 dwNumberOfItems >= 2 时会被 Rust 边界检查 panic，
+        // 用切片视图安全覆盖全部条目。
+        let items = unsafe { std::slice::from_raw_parts((*list).InterfaceInfo.as_ptr(), n) };
+        let hit = items
+            .iter()
+            .any(|info| info.isState == wlan_interface_state_connected);
         unsafe {
             WlanFreeMemory(list.cast());
         }
