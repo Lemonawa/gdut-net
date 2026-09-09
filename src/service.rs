@@ -268,7 +268,7 @@ mod win {
             Duration::from_secs(0),
         ))?;
 
-        let result = crate::runtime::start_all(cfg, token);
+        let result = crate::runtime::start_all(cfg, cfg_path, token);
 
         report_stopped(&status_handle)?;
         result
