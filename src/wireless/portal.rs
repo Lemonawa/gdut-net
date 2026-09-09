@@ -73,3 +73,63 @@ fn extract_json(body: &str) -> &str {
         _ => body.trim(),
     }
 }
+
+#[cfg(windows)]
+mod win {
+    use std::io::{Read, Write};
+    use std::net::{Ipv4Addr, SocketAddr, TcpStream};
+    use std::time::Duration;
+
+    use socket2::{Domain, Protocol, Socket, Type};
+    use tokio::task::spawn_blocking;
+
+    const TIMEOUT: Duration = Duration::from_secs(3);
+    const MAX_RESPONSE: u64 = 64 * 1024;
+    /// 与已实证脚本一致的 UA（requests 默认值）；设备计数按 MAC+UA（CONTEXT.md），别乱换。
+    const PORTAL_UA: &str = "python-requests/2.31.0";
+
+    fn parse_status(line: &str) -> Option<u16> {
+        line.split_ascii_whitespace().nth(1)?.parse().ok()
+    }
+
+    fn portal_get_blocking(src_ip: Ipv4Addr, url: &str) -> Option<(u16, String)> {
+        let rest = url.strip_prefix("http://")?;
+        let (host, path) = match rest.find('/') {
+            Some(i) => (&rest[..i], &rest[i..]),
+            None => (rest, "/"),
+        };
+        let addr: SocketAddr = format!("{host}:80").parse().ok().or_else(|| {
+            // host 形如 "10.0.3.2:801"
+            host.parse::<SocketAddr>().ok()
+        })?;
+        let socket = Socket::new(Domain::IPV4, Type::STREAM, Some(Protocol::TCP)).ok()?;
+        socket.bind(&SocketAddr::from((src_ip, 0)).into()).ok()?;
+        socket.set_read_timeout(Some(TIMEOUT)).ok()?;
+        socket.set_write_timeout(Some(TIMEOUT)).ok()?;
+        socket.connect_timeout(&addr.into(), TIMEOUT).ok()?;
+        let mut stream = TcpStream::from(socket);
+        let req = format!(
+            "GET {path} HTTP/1.0\r\nHost: {host}\r\nUser-Agent: {PORTAL_UA}\r\nConnection: close\r\n\r\n"
+        );
+        stream.write_all(req.as_bytes()).ok()?;
+        let mut buf = Vec::new();
+        stream.take(MAX_RESPONSE).read_to_end(&mut buf).ok()?;
+        let text = String::from_utf8_lossy(&buf);
+        let status = parse_status(text.split("\r\n").next()?)?;
+        let body = text
+            .split_once("\r\n\r\n")
+            .map(|(_, b)| b.to_string())
+            .unwrap_or_default();
+        Some((status, body))
+    }
+
+    pub async fn portal_get(src_ip: Ipv4Addr, url: &str) -> Option<(u16, String)> {
+        let url = url.to_string();
+        spawn_blocking(move || portal_get_blocking(src_ip, &url))
+            .await
+            .unwrap_or(None)
+    }
+}
+
+#[cfg(windows)]
+pub use win::portal_get;
