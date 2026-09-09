@@ -298,6 +298,7 @@ pub fn run_tray() -> Result<()> {
     // 避免两处并发建 PipeClient。
     let (status_tx, status_rx) = mpsc::channel::<String>();
     let (panel_redial_tx, panel_redial_rx) = mpsc::channel::<()>();
+    let (panel_setmode_tx, panel_setmode_rx) = mpsc::channel::<NetMode>();
     {
         let snapshot = Arc::clone(&snapshot);
         let status_tx = status_tx.clone();
@@ -325,13 +326,20 @@ pub fn run_tray() -> Result<()> {
             } else if event.id == *redial_item.id() {
                 send_redial();
             } else if event.id == *panel_item.id() {
-                panel::show(Arc::clone(&snapshot), panel_redial_tx.clone());
+                panel::show(
+                    Arc::clone(&snapshot),
+                    panel_redial_tx.clone(),
+                    panel_setmode_tx.clone(),
+                );
             } else if event.id == *quit_item.id() {
                 std::process::exit(0);
             }
         }
         while panel_redial_rx.try_recv().is_ok() {
             send_redial();
+        }
+        while let Ok(mode) = panel_setmode_rx.try_recv() {
+            send_set_mode(mode);
         }
         // IPC 线程送来的最新文本（只保留最后一条即可）。
         let mut latest = None;

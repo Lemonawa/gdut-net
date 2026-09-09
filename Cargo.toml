@@ -33,6 +33,8 @@ socket2 = "0.6"
 tokio-util = "0.7"
 
 [target.'cfg(windows)'.dependencies]
+eframe = { version = "0.36", default-features = false, features = ["glow", "default_fonts"] }
+winit = { version = "0.30", default-features = false }
 windows = { version = "0.62", features = [
   "Win32_Foundation",
   "Win32_NetworkManagement_Rras",
