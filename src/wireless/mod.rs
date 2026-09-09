@@ -3,6 +3,8 @@
 pub mod portal;
 #[cfg(windows)]
 pub mod routes;
+#[cfg(windows)]
+pub mod wlan;
 
 use crate::ipc::protocol::{NetMode, WPhase, WirelessSnapshot};
 use crate::probe::ProbeVerdict;
