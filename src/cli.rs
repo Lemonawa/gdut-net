@@ -1,3 +1,5 @@
+#[cfg(windows)]
+use crate::ipc::protocol::{Command, NetMode};
 #[cfg(not(windows))]
 use anyhow::bail;
 use anyhow::Result;
@@ -40,6 +42,21 @@ pub enum Cmd {
     Status,
     /// Start tray (user session)
     Tray,
+    /// Wireless (campus WiFi) utilities
+    Wireless {
+        #[command(subcommand)]
+        action: WirelessAction,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum WirelessAction {
+    /// Join campus SSID once, try one portal login, print reply (field check)
+    Test,
+    /// Switch service to wired-exclusive mode now
+    Off,
+    /// Switch service to wired+wireless standby mode now
+    Standby,
 }
 
 pub fn dispatch() -> Result<()> {
@@ -81,5 +98,52 @@ pub fn dispatch() -> Result<()> {
         Cmd::Tray => crate::tray::run_tray(),
         #[cfg(not(windows))]
         Cmd::Tray => bail!("tray is only supported on Windows"),
+        #[cfg(windows)]
+        Cmd::Wireless {
+            action: WirelessAction::Test,
+        } => crate::wireless::test::cli_test(&cli.config),
+        #[cfg(not(windows))]
+        Cmd::Wireless {
+            action: WirelessAction::Test,
+        } => bail!("wireless is only supported on Windows"),
+        #[cfg(windows)]
+        Cmd::Wireless {
+            action: WirelessAction::Off,
+        } => wireless_set_mode(NetMode::WiredExclusive),
+        #[cfg(windows)]
+        Cmd::Wireless {
+            action: WirelessAction::Standby,
+        } => wireless_set_mode(NetMode::WiredPlusStandby),
+        #[cfg(not(windows))]
+        Cmd::Wireless { action: _ } => bail!("wireless is only supported on Windows"),
     }
+}
+
+/// Build a current-thread runtime, connect to the service pipe, send one
+/// SetMode command, then read state snapshots until the service confirms
+/// the new mode.
+#[cfg(windows)]
+fn wireless_set_mode(mode: NetMode) -> Result<()> {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?
+        .block_on(async {
+            let mut client = crate::ipc::client::PipeClient::connect()?;
+            // The server pushes a snapshot immediately on connect (pre-command
+            // mode): consume it first or the confirmation would print the old
+            // mode.
+            client.next_state().await?;
+            client.send_cmd(Command::SetMode { mode }).await?;
+            // Wait for the post-command broadcast; intermediate frames may be
+            // periodic main-loop pushes still carrying the old mode, so read
+            // up to 5 snapshots until the requested one shows up.
+            for _ in 0..5 {
+                let s = client.next_state().await?;
+                if s.mode == mode {
+                    println!("Mode set: {}", s.mode_text());
+                    return Ok(());
+                }
+            }
+            anyhow::bail!("Service did not confirm mode switch (check `status` output)");
+        })
 }

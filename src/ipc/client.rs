@@ -101,6 +101,9 @@ mod win {
         );
         println!("Redial attempts: {}", s.redial_attempts);
         println!("Heartbeat: {}", s.heartbeat_text());
+        println!("Mode:     {}", s.mode_text());
+        println!("Wireless: {}", s.wireless_text());
+        println!("Events:   {} recent", s.events.len());
         Ok(())
     }
 }
