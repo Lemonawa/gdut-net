@@ -44,3 +44,35 @@ fn reject_non_ipv4_http_probe_url() {
     cfg.dial.http_probe_url = "https://9.9.9.9".into();
     assert!(cfg.validate().is_err());
 }
+
+// Brief deviation: Config::default() derives an empty account.student_id which
+// validate() rejects, so seed it to reach the wireless checks under test.
+#[test]
+fn wireless_defaults_and_validation() {
+    let mut cfg = Config::default();
+    cfg.account.student_id = "202100000000".into();
+    assert!(cfg.wireless.enabled);
+    assert_eq!(cfg.wireless.profile, "gdut");
+    assert!(cfg.validate().is_ok());
+
+    cfg.wireless.probe_host = "not-an-ip".into();
+    assert!(cfg.validate().is_err());
+
+    cfg.wireless.probe_host = "223.5.5.5".into();
+    cfg.wireless.portal_url = "http://portal.example.com/login".into(); // invalid: domain, not IPv4 literal
+    assert!(cfg.validate().is_err());
+
+    cfg.wireless.portal_url = "http://10.0.3.2:801/eportal/portal/login".into();
+    cfg.wireless.takeover_after_secs = 0;
+    assert!(cfg.validate().is_err());
+
+    cfg.wireless.takeover_after_secs = 8;
+    assert!(cfg.validate().is_ok());
+}
+
+#[test]
+fn sample_round_trips_with_wireless() {
+    let cfg: Config = toml::from_str(&Config::sample()).unwrap();
+    assert!(cfg.validate().is_ok());
+    assert_eq!(cfg.wireless.wlan_ac_ip, "172.16.254.2");
+}

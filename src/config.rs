@@ -4,6 +4,8 @@ use std::path::Path;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
+use crate::ipc::protocol::NetMode;
+
 pub const HEARTBEAT_MODULE_GDUT: &str = "gdut";
 
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
@@ -12,6 +14,8 @@ pub struct Config {
     pub dial: Dial,
     pub heartbeat: HeartbeatCfg,
     pub log: LogCfg,
+    #[serde(default)]
+    pub wireless: WirelessCfg,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
@@ -48,6 +52,35 @@ pub struct LogCfg {
     pub event_log: bool,
 }
 
+/// 无线接管配置（ADR-0005）：ssid 与 profile 同值且 WlanConnect 只用 profile，砍掉冗余字段。
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct WirelessCfg {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    #[serde(default)]
+    pub mode: NetMode,
+    /// Windows WLAN profile 名（netsh wlan connect 用）。
+    #[serde(default = "default_wlan_profile")]
+    pub profile: String,
+    /// HEMC eportal 登录接口。
+    #[serde(default = "default_portal_url")]
+    pub portal_url: String,
+    /// HEMC AC 地址。
+    #[serde(default = "default_wlan_ac_ip")]
+    pub wlan_ac_ip: String,
+    #[serde(default = "default_probe_host")]
+    pub probe_host: String,
+    /// 失联去抖：连续失联该秒数后才接管。
+    #[serde(default = "default_takeover_after")]
+    pub takeover_after_secs: u64,
+    /// 恢复去抖：有线稳定该秒数后让位。
+    #[serde(default = "default_release_after")]
+    pub release_after_secs: u64,
+    /// standby 模式下 WLAN 路由 metric 压制值；0 = 不压制。
+    #[serde(default = "default_standby_metric")]
+    pub standby_metric: u32,
+}
+
 impl Default for Dial {
     fn default() -> Self {
         Self {
@@ -79,6 +112,47 @@ impl Default for LogCfg {
             max_size_mb: 5,
             rotate_keep: 5,
             event_log: false,
+        }
+    }
+}
+
+fn default_true() -> bool {
+    true
+}
+fn default_wlan_profile() -> String {
+    "gdut".into()
+}
+fn default_portal_url() -> String {
+    "http://10.0.3.2:801/eportal/portal/login".into()
+}
+fn default_wlan_ac_ip() -> String {
+    "172.16.254.2".into()
+}
+fn default_probe_host() -> String {
+    "223.5.5.5".into()
+}
+fn default_takeover_after() -> u64 {
+    8
+}
+fn default_release_after() -> u64 {
+    10
+}
+fn default_standby_metric() -> u32 {
+    10
+}
+
+impl Default for WirelessCfg {
+    fn default() -> Self {
+        Self {
+            enabled: default_true(),
+            mode: NetMode::default(),
+            profile: default_wlan_profile(),
+            portal_url: default_portal_url(),
+            wlan_ac_ip: default_wlan_ac_ip(),
+            probe_host: default_probe_host(),
+            takeover_after_secs: default_takeover_after(),
+            release_after_secs: default_release_after(),
+            standby_metric: default_standby_metric(),
         }
     }
 }
@@ -125,6 +199,27 @@ impl Config {
                 "dial.http_probe_url must be http:// + IPv4 literal (with optional port), got {:?}",
                 self.dial.http_probe_url
             );
+        }
+        let w = &self.wireless;
+        if w.enabled {
+            if crate::probe::parse_http_probe_target(&w.portal_url).is_none() {
+                anyhow::bail!(
+                    "wireless.portal_url must be http:// + IPv4 literal (with optional port), got {:?}",
+                    w.portal_url
+                );
+            }
+            if w.probe_host.parse::<std::net::Ipv4Addr>().is_err() {
+                anyhow::bail!(
+                    "wireless.probe_host must be an IPv4 literal, got {:?}",
+                    w.probe_host
+                );
+            }
+            if w.takeover_after_secs < 1 || w.release_after_secs < 1 {
+                anyhow::bail!("wireless takeover_after_secs/release_after_secs must be >= 1");
+            }
+            if w.standby_metric > 9999 {
+                anyhow::bail!("wireless.standby_metric must be <= 9999 (0 = disable)");
+            }
         }
         Ok(())
     }
