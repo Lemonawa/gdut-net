@@ -134,7 +134,7 @@ impl Config {
         cfg.account.student_id = "your_student_id".into();
         cfg.account.password_blob = String::new();
         format!(
-            "# University Town auth server 10.0.3.2; Longdong/Dongfeng Road is 10.0.3.6\n# Heartbeat disabled by default; must verify via packet capture before enabling (see ADR-0002)\n{}",
+            "# HEMC (Higher Education Mega Center) auth server 10.0.3.2; Longdong/Dongfeng Road is 10.0.3.6\n# Heartbeat disabled by default; must verify via packet capture before enabling (see ADR-0002)\n{}",
             toml::to_string_pretty(&cfg).expect("default config is serializable")
         )
     }

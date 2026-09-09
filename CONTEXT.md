@@ -1,6 +1,6 @@
 # gdut-net
 
-广东工业大学（大学城校区）有线网第三方认证客户端，替代 Dr.COM 官方客户端。核心是 PPPoE 拨号守护，可选的 Dr.COM 心跳兼容模式，且与 TUN 类虚拟网卡完全共存。
+广东工业大学（大学城校区 = Higher Education Mega Center）有线网第三方认证客户端，替代 Dr.COM 官方客户端。核心是 PPPoE 拨号守护，可选的 Dr.COM 心跳兼容模式，且与 TUN 类虚拟网卡完全共存。
 
 ## Language
 
@@ -34,7 +34,27 @@ _Avoid_: ping 检测、保活探测
 学校按 MAC + HTTP User-Agent 判定设备数（1 有线 + 2 无线）；DHCP/随机 MAC 会误判超限。
 
 **统一身份认证**:
-无线网网页认证所用账号体系，与本客户端无关（明确非目标）。
+无线网网页认证（Dr.COM eportal，`10.0.3.2:801`）所用账号体系，与有线同一套学号+密码；无线接管功能由本客户端的 wireless 模块自动完成。
+
+### 无线接管（Wireless Takeover）
+
+**无线接管 (Wireless Takeover)**:
+有线失联后自动关联 SSID `gdut` 并完成 eportal 认证、由 wireless manager 执行的整套动作。
+_Avoid_: WiFi 切换（口语）、回退（fallback）
+
+**模式 (Net Mode)**:
+`wired_exclusive`（平时 WLAN 断开，失联去抖后接管，恢复稳定后让位）或 `wired_plus_standby`（WLAN 常连常认证，OS 路由瞬间接替）。运行时经 IPC `SetMode` 切换并持久化。
+_Avoid_: 双模（口语）
+
+**让位 (Release)**:
+exclusive 模式下有线恢复稳定后断开 WLAN 关联、撤销 /32 路由、还原 metric 的动作。
+_Avoid_: 注销（logout 接口已知不可用，不用）
+
+**eportal 认证 (Portal Auth)**:
+绑 WLAN 源 IP 的 HTTP GET 登录请求（参数含学号/密码/wlan_ac_ip），回包 JSONP `dr1004({"result":"1",...})` 即成功。含密码的 URL 永不落日志。
+
+**接管去抖 (Takeover Debounce)**:
+以太网 link down 或有线会话失联持续 `takeover_after_secs` 才启动接管，防抖动误切。
 
 ### 心跳（兼容模式）
 
@@ -63,6 +83,8 @@ _Avoid_: 界面（泛称）
 
 ## Rules
 
+- 无线接管的一切发包（portal 登录、ICMP/HTTP 探针）显式绑 WLAN 适配器源 IP；WLAN 会话存活期间服务自管两条 /32 主机路由（portal 主机 + HTTP 探测目标，via WLAN 网关），否则 Mihomo TUN 覆盖路由下绑源 socket `ENETUNREACH`。增删与让位/切模式/服务停止三条出口绑定，启动清残留。
+- 含密码的 portal URL 永不落日志/事件尾巴（打码只留 host+path）。
 - 心跳相关的一切发包绑定物理适配器，绑定失败（端口 61440 被官方客户端占用）视为兼容模式不可用，报错而非静默。
 - "掉线"以流量探测为准，不单看 RAS 状态。
 - 双出口下 TUN/代理出站必须显式绑 `gdut`（Mihomo `interface-name: gdut`；`auto-detect-interface` 会跟 metric 0 的物理口走，被墙），TUN MTU≤1400（PPPoE 1480 减开销）。
