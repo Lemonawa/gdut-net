@@ -122,7 +122,7 @@ struct WirelessSnapshot { phase: String, ip: Option<String>, last_error: Option<
 ## 10. CLI
 
 ```
-gdut-net wireless test     # 连 gdut → 等 IP → 发一次 portal login → 打印回包原文与解析结果；不动路由、不驻留（现场验证 wlan_ac_ip 等常量）
+gdut-net wireless test     # 连 gdut → 等 IP → 临时加 portal /32 路由（结束即删，自包含）→ 发一次 portal login → 打印回包原文与解析结果；不驻留（现场验证 wlan_ac_ip 等常量）
 gdut-net wireless off      # 等价 SetMode(exclusive) + 立即让位（现场排障用）
 gdut-net wireless standby  # 等价 SetMode(standby)
 ```
@@ -139,10 +139,10 @@ gdut-net wireless standby  # 等价 SetMode(standby)
 
 | 风险 | 对策 |
 |---|---|
-| Session 0 服务 WlanConnect 全用户 profile | 预期能用；fallback：服务内 CreateProcess `netsh wlan connect`（实现为可切换后端，test 时人工验证哪种可行） |
+| Session 0 服务 WlanConnect 全用户 profile | 预期能用；fallback：服务内 CreateProcess `netsh wlan connect`（`wlan.rs` 内 `WlanControl` trait 双后端，`test` 时人工验证哪种可行） |
 | portal 会话寿命/是否需主动 keepalive | 探针检踢 + 自动重登已覆盖；观察期调参 |
 | `wlan_ac_ip` 等常量漂移 | 全走配置；`wireless test` 一次实测 |
-| Mihomo TUN 与 /32 路由共存 | /32 只影响两台主机（portal 与探测目标），TUN 规则丢失这两目标无感 |
+| Mihomo TUN 与 /32 路由共存 | /32 只影响两台主机（portal 与探测目标），TUN 规则丢失这两目标无感；`wireless test` 自包含：临时路由结束即删 |
 | standby 下 NLA 弹"登录网络"提示 | 无害，忽略 |
 | 拔线接管期间 Windows 自动连别的 WLAN | profile `gdut` 设置为不自动连不会（开放网络默认手动）；`Joining` 前显式连接目标 profile |
 
