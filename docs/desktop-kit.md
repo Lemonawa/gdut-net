@@ -24,6 +24,8 @@
 - **在校开机**：服务自启拨号，托盘自启（`HKCU\...\Run\gdut-net-tray`，新版无黑框）。`status.bat` 确认 Connected。
 - **离校回家**：双击 `一键回家.bat`（管理员）。回家后普通网络即用，gdut-net 静默。
 - **返校**：插上网线，双击 `一键回校.bat`（管理员）。拨号失败会自动停服务并告诉你下一步（跑 `一键切换.bat` 走完整流程）。
+- **拔线改无线**：服务自动接管（exclusive 默认）；托盘/面板可切 "Wired + wireless standby" 常备无缝。
+- **现场排障**：管理员 `.\gdut-net.exe wireless test` 打一次真实 portal 回包（自回滚，不留状态）。
 - **网络炸了且 AI 不可达**：每个动网络的操作都自带回滚块，直接照着跑，不用等我。回滚件 `gdut-net-bak.exe` + Dr.COM（`rasdial 'Dr.COM'`）是最后两道防线。
 
 ## 代理 / TUN 铁律（校园网双出口）

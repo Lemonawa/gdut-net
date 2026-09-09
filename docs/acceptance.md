@@ -43,3 +43,20 @@ reg query "HKLM\SYSTEM\CurrentControlSet\Services\EventLog\Application\gdut-net"
 .\gdut-net.exe tray      # 托盘青色图标；菜单 Status / Redial now / Details / Exit
 .\gdut-net.exe status    # 终端打印：状态、在线时长、IP、掉线原因、重拨次数、心跳
 ```
+
+## 无线接管（v0.3）
+
+前置：`gdut-net.exe install` 过一次；WLAN profile `gdut` 存在（手工连过一次校园 WiFi）。
+
+```powershell
+.\gdut-net.exe wireless test    # 一次性现场验证：应打印 WLAN IP/gw、HTTP 200、RESULT: SUCCESS，结束自动断开
+.\gdut-net.exe status           # Mode: ... / Wireless: ... 两行出现
+```
+
+| # | 标准 | 验证方法 |
+|---|---|---|
+| 6 | exclusive：拔线 ≤15s 无线可用 | `Get-Content ...log -Wait` 观察 "associating" → "portal login success"；插回线 ≤20s 出现 "releasing"；`netsh wlan show interfaces` 回 Disconnected |
+| 7 | standby：拔线零感知 | 托盘切 "Wired + wireless standby"，常驻 ping 窗口拔线观察丢包 ≤2 个；插回线 WLAN 不断（仍 Online） |
+| 8 | 模式持久化 | 切 standby → `net stop/start gdut-net` → status 的 Mode 仍为 standby |
+| 9 | 路由无残留 | 服务停止后 `route print` 无 `10.0.3.2 /32`、`223.5.5.5 /32`；WLAN metric 还原（`Get-NetIPInterface -InterfaceAlias WLAN`） |
+| 10 | TUN 共存 | Mihomo TUN 开着跑 6/7 两项（/32 由服务自管，ADR-0005） |

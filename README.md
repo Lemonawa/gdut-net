@@ -4,7 +4,7 @@
 [![Release](https://img.shields.io/github/v/release/Lemonawa/gdut-net)](https://github.com/Lemonawa/gdut-net/releases)
 [WTFPL](./LICENSE)
 
-Third-party wired-network auth client for Guangdong University of Technology (Higher Education Mega Center campus): a single Rust binary running as a Windows service that dials and keeps a PPPoE session alive, auto-redials on drops, with an optional Dr.COM heartbeat compat mode. Coexists with Clash TUN / Tailscale (wintun) — all dial and probe traffic is explicitly bound to the physical NIC.
+Third-party wired-network auth client for Guangdong University of Technology (Higher Education Mega Center campus): a single Rust binary running as a Windows service that dials and keeps a PPPoE session alive, auto-redials on drops, with an optional Dr.COM heartbeat compat mode. Coexists with Clash TUN / Tailscale (wintun) — all dial and probe traffic is explicitly bound to the physical NIC. When the wired link drops, the service can take over the campus WiFi (eportal web auth) automatically, in exclusive or zero-gap standby mode.
 
 Replaces the official Dr.COM client. No LSP/npf injection.
 
@@ -61,6 +61,17 @@ server = "10.0.3.2"                      # HEMC; Longdong/Dongfeng Road 10.0.3.6
 port = 61440
 interval_secs = 20
 
+[wireless]
+enabled = true
+mode = "wired_exclusive"                # or "wired_plus_standby"
+profile = "gdut"                        # Windows WLAN profile (create by joining once)
+portal_url = "http://10.0.3.2:801/eportal/portal/login"
+wlan_ac_ip = "172.16.254.2"             # HEMC; Longdong/Dongfeng Road unverified
+probe_host = "223.5.5.5"
+takeover_after_secs = 8
+release_after_secs = 10
+standby_metric = 10                     # 0 = do not suppress
+
 [log]
 dir = "C:\\ProgramData\\gdut-net\\logs"
 max_size_mb = 5                          # per-file rotation threshold
@@ -77,6 +88,7 @@ event_log = false                        # mirror warn/error to Windows event lo
 | `dial.probe_interval_secs` | Drop-probe period |
 | `dial.http_probe_url` | HTTP fallback probe when gateway ICMP fails (tells "kicked" from "link down") |
 | `heartbeat.*` | Dr.COM heartbeat compat mode (default off, see below) |
+| `wireless.*` | Wireless takeover of campus WiFi when the wired link drops (exclusive/standby modes, eportal login, see [ADR-0005](docs/adr/0005-wireless-mode-switch.md)) |
 | `log.*` | Log dir, size-based rotation, retention, event-log mirror |
 
 ### Heartbeat compat mode (default off)
@@ -92,9 +104,10 @@ If the official client occupies local UDP 61440, compat mode is unavailable and 
 ```powershell
 .\gdut-net.exe status    # prints status, uptime, IP, drop reason, redial count, heartbeat
 .\gdut-net.exe tray      # tray icon; menu: status / redial now / details / exit
+.\gdut-net.exe wireless test|off|standby    # one-shot portal check / switch to exclusive / switch to standby
 ```
 
-Full on-device acceptance checklist (install, TUN coexistence, memory, 72h soak, clean uninstall): [docs/acceptance.md](docs/acceptance.md).
+Full on-device acceptance checklist (install, TUN coexistence, memory, 72h soak, clean uninstall, wireless takeover): [docs/acceptance.md](docs/acceptance.md).
 
 ## Development
 

@@ -13,7 +13,7 @@
 - **物理适配器绑定**（`CONTEXT.md` Rules）：心跳/探测/拨号一切发包显式绑物理网卡，绝不走 TUN/wintun。`adapter::physical_adapter()` 找 `IF_TYPE_ETHERNET_CSMACD+Up+非虚拟`，有网关者优先。心跳 `bind` 本地 `0.0.0.0:61440` 失败 → `CompatModeUnavailable` 报错而非静默（端口被官方客户端占用）。
 - **掉线判定**（ADR-0003）：以流量探测为准，不单看 `RASCS_Connected`。两级：网关 ICMP（`IcmpSendEcho2Ex` 绑源 IP，1500ms，失败 `probe_interval/4` 复核）→ 连续 2 次 `LinkDown/Kicked` 才判 `Drop` 触发重拨。僵死会话（RAS 显示已连但被踢）必须能检出。
 - **术语**：拨号条目≠宽带连接/VPN；掉线≠断线；兼容模式≠保活模式；探针≠ping 检测。见 `CONTEXT.md`。
-- **不做**：不扫描虚拟网卡、不装 LSP/驱动/WinPcap、不做无线网页认证、不做限速绕过。
+- **不做**：不扫描虚拟网卡、不装 LSP/驱动/WinPcap、不做限速绕过（无线网页认证已由 wireless 模块承担，见 ADR-0005）。
 - **密码**：`config.toml` 中 `password_blob = GDUT1:<hex>:<base64>`，DPAPI 机器级 `CRYPTPROTECT_LOCAL_MACHINE` + `HKLM\SOFTWARE\gdut-net\entropy`（32B，REG_BINARY）。`unwrap_blob` 需判 `GDUT1` 前缀与 hex/base64 合法性。
 - **心跳**：默认 `heartbeat.enabled=false`。GDUT 变体（ADR-0002）无需登录，四报文 20s 周期打 `server:61440`，`seed[0]&3` 选校验模式，从抓包规格洁净室实现，**禁止逐行翻译** `drcom-generic`(AGPL)/`gdut-drcom`(GPL) 源码。
 - **重拨**：指数退避 `1s→300s` 封顶，稳定 `300s` 重置；`691` 认证失败固定 `600s`（`backoff::AUTH_FAIL_DELAY`），不进快退避。
