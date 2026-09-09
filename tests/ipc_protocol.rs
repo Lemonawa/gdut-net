@@ -1,4 +1,5 @@
 use gdut_net::ipc::protocol::*;
+use std::collections::VecDeque;
 
 #[test]
 fn state_msg_roundtrip() {
@@ -9,6 +10,9 @@ fn state_msg_roundtrip() {
         last_drop_reason: None,
         redial_attempts: 0,
         heartbeat: HeartbeatStatus::Off,
+        mode: NetMode::WiredExclusive,
+        wireless: WirelessSnapshot::default(),
+        events: VecDeque::new(),
     };
     let bytes = encode_frame(&ServerMsg::State {
         state: snap.clone(),
@@ -41,6 +45,9 @@ fn heartbeat_error_status_serializes() {
         last_drop_reason: None,
         redial_attempts: 0,
         heartbeat: HeartbeatStatus::Error("bind 61440 被占用".into()),
+        mode: NetMode::WiredExclusive,
+        wireless: WirelessSnapshot::default(),
+        events: VecDeque::new(),
     };
     let bytes = encode_frame(&ServerMsg::State { state: snap });
     assert!(String::from_utf8_lossy(&bytes).contains("bind 61440"));
@@ -64,6 +71,9 @@ fn snapshot_texts() {
         last_drop_reason: None,
         redial_attempts: 0,
         heartbeat: HeartbeatStatus::Off,
+        mode: NetMode::WiredExclusive,
+        wireless: WirelessSnapshot::default(),
+        events: VecDeque::new(),
     };
     assert_eq!(snap.status_text(), "Connected");
     assert_eq!(snap.uptime_text(), "—");
@@ -74,4 +84,44 @@ fn snapshot_texts() {
 
     snap.status = SessionStatus::Backoff;
     assert_eq!(snap.status_text(), "Backoff (retrying)");
+}
+
+#[test]
+fn set_mode_command_serializes() {
+    let bytes = encode_frame(&ClientMsg::Cmd {
+        c: Command::SetMode {
+            mode: NetMode::WiredPlusStandby,
+        },
+    });
+    let msg: ClientMsg = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(
+        msg,
+        ClientMsg::Cmd {
+            c: Command::SetMode {
+                mode: NetMode::WiredPlusStandby
+            }
+        }
+    );
+}
+
+#[test]
+fn old_snapshot_json_parses_into_new_struct() {
+    // 旧版服务发出的快照（无 mode/wireless/events 字段）必须能被新托盘解析。
+    let legacy = br#"{"status":"connected","since_unix":1756500000,"ip":"10.30.1.2","last_drop_reason":null,"redial_attempts":0,"heartbeat":"off"}"#;
+    let snap: StateSnapshot = serde_json::from_slice(legacy).unwrap();
+    assert_eq!(snap.mode, NetMode::WiredExclusive);
+    assert_eq!(snap.wireless.phase, WPhase::Off);
+    assert!(snap.events.is_empty());
+}
+
+#[test]
+fn event_log_caps_and_formats() {
+    let mut log = EventLog::new();
+    for i in 0..25 {
+        log.push(1_757_000_000 + i, &format!("event {i}"));
+    }
+    assert_eq!(log.ring().len(), 20);
+    assert!(log.ring().back().unwrap().ends_with("event 24"));
+    assert!(log.ring().front().unwrap().contains("event 5"));
+    assert!(log.ring().front().unwrap().starts_with('[')); // "[HH:MM:SS] ..."
 }

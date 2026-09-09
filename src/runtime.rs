@@ -320,6 +320,11 @@ mod win {
                             // 睡满退避时长。
                             watchdog.request_redial();
                         }
+                        // SetMode 处理由 wireless manager（后续任务）接管；
+                        // 先占位保编译：收到即记日志，不改行为。
+                        Some(Command::SetMode { .. }) => {
+                            log::warn!("IPC command SetMode received but wireless manager is not wired yet");
+                        }
                         // IPC server 已退出（随 stop）：break 防 busy-loop。
                         None => break,
                     }

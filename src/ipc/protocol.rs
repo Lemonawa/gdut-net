@@ -19,6 +19,37 @@ pub enum HeartbeatStatus {
     Error(String),
 }
 
+/// 网络模式（ADR-0005）：exclusive（失联去抖接管/恢复让位）或 standby（WLAN 常连）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum NetMode {
+    #[default]
+    WiredExclusive,
+    WiredPlusStandby,
+}
+
+/// 无线相位（快照用，无 payload；错误文本走 WirelessSnapshot.last_error）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum WPhase {
+    #[default]
+    Off,
+    Joining,
+    Authing,
+    Online,
+    Error,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct WirelessSnapshot {
+    #[serde(default)]
+    pub phase: WPhase,
+    #[serde(default)]
+    pub ip: Option<String>,
+    #[serde(default)]
+    pub last_error: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StateSnapshot {
     pub status: SessionStatus,
@@ -27,6 +58,12 @@ pub struct StateSnapshot {
     pub last_drop_reason: Option<String>,
     pub redial_attempts: u32,
     pub heartbeat: HeartbeatStatus,
+    #[serde(default)]
+    pub mode: NetMode,
+    #[serde(default)]
+    pub wireless: WirelessSnapshot,
+    #[serde(default)]
+    pub events: VecDeque<String>,
 }
 
 impl StateSnapshot {
@@ -64,6 +101,30 @@ impl StateSnapshot {
             HeartbeatStatus::Error(e) => format!("Error ({e})"),
         }
     }
+
+    /// 模式英文描述（status/托盘共用）。
+    pub fn mode_text(&self) -> String {
+        match self.mode {
+            NetMode::WiredExclusive => "Wired only (auto wireless takeover)".to_string(),
+            NetMode::WiredPlusStandby => "Wired + wireless standby".to_string(),
+        }
+    }
+
+    /// 无线链路英文描述。
+    pub fn wireless_text(&self) -> String {
+        let phase = match self.wireless.phase {
+            WPhase::Off => "Off",
+            WPhase::Joining => "Joining",
+            WPhase::Authing => "Authenticating",
+            WPhase::Online => "Online",
+            WPhase::Error => "Error",
+        };
+        match (&self.wireless.ip, &self.wireless.last_error) {
+            (Some(ip), _) => format!("{phase} {ip}"),
+            (None, Some(e)) => format!("{phase} ({e})"),
+            _ => phase.to_string(),
+        }
+    }
 }
 
 /// 秒数 → `HH:MM:SS`（小时不封顶）。
@@ -82,6 +143,7 @@ pub enum ServerMsg {
 #[serde(tag = "t", rename_all = "snake_case")]
 pub enum Command {
     Redial,
+    SetMode { mode: NetMode },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -110,5 +172,45 @@ impl FrameDecoder {
             frames.push_back(frame);
         }
         frames
+    }
+}
+
+/// 事件环（快照 events 的服务端源）：容量 20，UTC HH:MM:SS 前缀。
+#[derive(Debug, Clone)]
+pub struct EventLog {
+    cap: usize,
+    ring: VecDeque<String>,
+}
+
+impl Default for EventLog {
+    fn default() -> Self {
+        Self {
+            cap: 20,
+            ring: VecDeque::new(),
+        }
+    }
+}
+
+impl EventLog {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn push(&mut self, unix_secs: u64, msg: &str) {
+        let d = unix_secs % 86_400;
+        let line = format!(
+            "[{:02}:{:02}:{:02}] {msg}",
+            d / 3600,
+            (d % 3600) / 60,
+            d % 60
+        );
+        if self.ring.len() >= self.cap {
+            self.ring.pop_front();
+        }
+        self.ring.push_back(line);
+    }
+
+    pub fn ring(&self) -> &VecDeque<String> {
+        &self.ring
     }
 }

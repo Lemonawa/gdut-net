@@ -4,13 +4,16 @@
 //! "Drop"以流量探测为准（不单看 RAS 状态）；`is_connected()==false`
 //! 是可靠的即时掉线信号（上游语义：668 连接不存在归 Disconnected）。
 
+use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
 
 use crate::backoff::Backoff;
-use crate::ipc::protocol::{HeartbeatStatus, SessionStatus, StateSnapshot};
+use crate::ipc::protocol::{
+    HeartbeatStatus, NetMode, SessionStatus, StateSnapshot, WirelessSnapshot,
+};
 use crate::probe::ProbeVerdict;
 use crate::ras::ErrKind;
 
@@ -114,6 +117,9 @@ impl Watchdog {
             last_drop_reason: self.last_drop_reason.clone(),
             redial_attempts: self.attempts,
             heartbeat: HeartbeatStatus::Off,
+            mode: NetMode::default(),
+            wireless: WirelessSnapshot::default(),
+            events: VecDeque::new(),
         }
     }
 
