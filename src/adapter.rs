@@ -24,12 +24,13 @@ pub fn is_virtual(name_or_desc: &str) -> bool {
     VIRTUAL_KEYWORDS.iter().any(|k| lower.contains(k))
 }
 
-/// 一个可用网络出口：适配器名 + IPv4 + 可选网关。
+/// 一个可用网络出口：适配器名 + IPv4 + 可选网关 + 接口索引。
 #[derive(Debug, Clone)]
 pub struct AdapterInfo {
     pub name: String,
     pub ipv4: Ipv4Addr,
     pub gateway: Option<Ipv4Addr>,
+    pub ifindex: u32,
 }
 
 #[cfg(windows)]
@@ -40,8 +41,9 @@ mod win {
     use anyhow::{anyhow, Result};
     use windows::core::PWSTR;
     use windows::Win32::NetworkManagement::IpHelper::{
-        GetAdaptersAddresses, GAA_FLAG_INCLUDE_GATEWAYS, IF_TYPE_ETHERNET_CSMACD, IF_TYPE_PPP,
-        IP_ADAPTER_ADDRESSES_LH, IP_ADAPTER_GATEWAY_ADDRESS_LH, IP_ADAPTER_UNICAST_ADDRESS_LH,
+        GetAdaptersAddresses, GAA_FLAG_INCLUDE_GATEWAYS, IF_TYPE_ETHERNET_CSMACD,
+        IF_TYPE_IEEE80211, IF_TYPE_PPP, IP_ADAPTER_ADDRESSES_LH, IP_ADAPTER_GATEWAY_ADDRESS_LH,
+        IP_ADAPTER_UNICAST_ADDRESS_LH,
     };
     use windows::Win32::NetworkManagement::Ndis::IfOperStatusUp;
     use windows::Win32::Networking::WinSock::{AF_INET, SOCKADDR_IN, SOCKET_ADDRESS};
@@ -54,6 +56,7 @@ mod win {
         pub desc: String,
         pub ipv4: Option<Ipv4Addr>,
         pub gateway: Option<Ipv4Addr>,
+        pub ifindex: u32,
     }
 
     /// 未启用 is_virtual 过滤前的选择条件（按 IfType/OperStatus 等）。
@@ -140,6 +143,7 @@ mod win {
                     desc: pwstr_to_string(a.Description),
                     ipv4: unicast_ipv4(a),
                     gateway: gateway_ipv4(a),
+                    ifindex: unsafe { a.Anonymous1.Anonymous.IfIndex },
                 });
             }
             node = a.Next;
@@ -160,6 +164,7 @@ mod win {
                     name: a.name,
                     ipv4,
                     gateway: a.gateway,
+                    ifindex: a.ifindex,
                 })
             })
             .collect();
@@ -185,8 +190,45 @@ mod win {
                 name: a.name,
                 ipv4,
                 gateway: a.gateway,
+                ifindex: a.ifindex,
             })
         })
+    }
+
+    /// WLAN 适配器（IF_TYPE_IEEE80211 + OperStatus Up + 有 IPv4，非虚拟），有网关者优先。
+    pub(super) fn wlan_adapter() -> Option<AdapterInfo> {
+        let selector = |a: &IP_ADAPTER_ADDRESSES_LH| {
+            a.IfType == IF_TYPE_IEEE80211 && a.OperStatus == IfOperStatusUp
+        };
+        let mut candidates: Vec<AdapterInfo> = adapters(&selector)
+            .ok()?
+            .into_iter()
+            .filter(|a| !super::is_virtual(&a.name) && !super::is_virtual(&a.desc))
+            .filter_map(|a| {
+                a.ipv4.map(|ipv4| AdapterInfo {
+                    name: a.name,
+                    ipv4,
+                    gateway: a.gateway,
+                    ifindex: a.ifindex,
+                })
+            })
+            .collect();
+        candidates.sort_by_key(|a| a.gateway.is_none());
+        candidates.into_iter().next()
+    }
+
+    /// 以太网链路态：任一非虚拟以太网卡 Up（拔线 → false，秒级信号）。
+    /// 与 physical_adapter() 区别：不要求已有 IPv4（DHCP 前的 link up 也算）。
+    pub(super) fn ethernet_link_up() -> bool {
+        let selector = |a: &IP_ADAPTER_ADDRESSES_LH| {
+            a.IfType == IF_TYPE_ETHERNET_CSMACD && a.OperStatus == IfOperStatusUp
+        };
+        adapters(&selector)
+            .map(|list| {
+                list.iter()
+                    .any(|a| !super::is_virtual(&a.name) && !super::is_virtual(&a.desc))
+            })
+            .unwrap_or(false)
     }
 }
 
@@ -206,6 +248,18 @@ pub fn ppp_adapter_ip() -> Option<Ipv4Addr> {
 #[cfg(windows)]
 pub fn ppp_adapter() -> Option<AdapterInfo> {
     win::ppp_adapter()
+}
+
+/// 取 WLAN 适配器（无线接管的探测/心跳绑定目标）。
+#[cfg(windows)]
+pub fn wlan_adapter() -> Option<AdapterInfo> {
+    win::wlan_adapter()
+}
+
+/// 以太网链路态：任一非虚拟以太网卡 Up（拔线检测的秒级信号）。
+#[cfg(windows)]
+pub fn ethernet_link_up() -> bool {
+    win::ethernet_link_up()
 }
 
 #[cfg(test)]
