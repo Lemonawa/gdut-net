@@ -18,3 +18,4 @@ pub mod service;
 #[cfg(windows)]
 pub mod tray;
 pub mod watchdog;
+pub mod wireless;
