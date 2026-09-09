@@ -18,7 +18,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use anyhow::{anyhow, Context, Result};
-use tray_icon::menu::{Menu, MenuEvent, MenuItem};
+use tray_icon::menu::{CheckMenuItem, Menu, MenuEvent, MenuItem, PredefinedMenuItem};
 use windows::core::PCWSTR;
 use windows::Win32::Foundation::ERROR_SUCCESS;
 use windows::Win32::System::Registry::{
@@ -28,7 +28,7 @@ use windows::Win32::System::Registry::{
 use windows::Win32::System::Threading::INFINITE;
 
 use crate::ipc::client::PipeClient;
-use crate::ipc::protocol::{Command, StateSnapshot};
+use crate::ipc::protocol::{Command, NetMode, SessionStatus, StateSnapshot, WPhase};
 
 /// 后台线程 connect 失败后的重试间隔。
 const CONNECT_RETRY: Duration = Duration::from_secs(3);
@@ -36,22 +36,88 @@ const CONNECT_RETRY: Duration = Duration::from_secs(3);
 /// 共享快照缓存：None = 尚未收到（服务未运行/刚断开）。
 pub(crate) type SharedSnapshot = Arc<Mutex<Option<StateSnapshot>>>;
 
-/// 32x32 RGBA 占位图标：主题青色方块（代码生成，无需二进制图片资源）。
-fn tray_icon_rgba() -> Vec<u8> {
+/// 32x32 RGBA 方块图标（代码生成，无需二进制图片资源）：2px 透明留白，
+/// 托盘里不顶边。
+fn icon_rgba(color: [u8; 3]) -> Vec<u8> {
     const S: usize = 32;
+    let [r, g, b] = color;
     let mut rgba = Vec::with_capacity(S * S * 4);
     let inner = 2..S - 2;
     for y in 0..S {
         for x in 0..S {
-            let (r, g, b, a) = if inner.contains(&x) && inner.contains(&y) {
-                (0x30, 0x9c, 0xdc, 0xff) // 主题青
+            let a = if inner.contains(&x) && inner.contains(&y) {
+                0xff
             } else {
-                (0x30, 0x9c, 0xdc, 0x00) // 2px 透明留白，托盘里不顶边
+                0x00
             };
             rgba.extend_from_slice(&[r, g, b, a]);
         }
     }
     rgba
+}
+
+/// 托盘图标语义：无线在线（蓝）/ 有线在线（绿）/ 重试中（黄）/ 掉线（灰）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum IconKind {
+    /// 有线 PPP 在线。
+    WiredUp,
+    /// 无线已接管在线。
+    WirelessUp,
+    /// 重拨退避/认证失败/拨号中。
+    Backoff,
+    /// 空闲或无快照。
+    Down,
+}
+
+impl IconKind {
+    /// 图标配色：绿 `2ec48a` / 蓝 `309cdc` / 黄 `e0b000` / 灰 `888888`。
+    const ALL: [IconKind; 4] = [
+        IconKind::WiredUp,
+        IconKind::WirelessUp,
+        IconKind::Backoff,
+        IconKind::Down,
+    ];
+
+    fn color(self) -> [u8; 3] {
+        match self {
+            IconKind::WiredUp => [0x2e, 0xc4, 0x8a],
+            IconKind::WirelessUp => [0x30, 0x9c, 0xdc],
+            IconKind::Backoff => [0xe0, 0xb0, 0x00],
+            IconKind::Down => [0x88, 0x88, 0x88],
+        }
+    }
+}
+
+/// 从快照推图标语义：无线 Online 优先于有线状态（接管即蓝灯）；无快照
+/// 视为掉线灰灯。
+fn icon_kind(s: Option<&StateSnapshot>) -> IconKind {
+    match s {
+        None => IconKind::Down,
+        Some(s) if s.wireless.phase == WPhase::Online => IconKind::WirelessUp,
+        Some(s) => match s.status {
+            SessionStatus::Connected => IconKind::WiredUp,
+            SessionStatus::Backoff | SessionStatus::AuthFail | SessionStatus::Dialing => {
+                IconKind::Backoff
+            }
+            SessionStatus::Idle => IconKind::Down,
+        },
+    }
+}
+
+/// 按语义取预建图标（ALL 顺序与 `icons` 构建顺序一致）。
+fn icon_for(icons: &[tray_icon::Icon], kind: IconKind) -> Option<&tray_icon::Icon> {
+    IconKind::ALL
+        .iter()
+        .position(|k| *k == kind)
+        .and_then(|idx| icons.get(idx))
+}
+
+/// 托盘状态行（菜单首项 + IPC 推送共用）：None = 无快照按掉线展示。
+fn status_line(s: Option<&StateSnapshot>) -> String {
+    match s {
+        None => "Wired: Disconnected".to_string(),
+        Some(s) => format!("Wired: {} · WiFi: {}", s.status_text(), s.wireless_text()),
+    }
 }
 
 /// 注册 AUMID（HKCU\Software\Classes\AppUserModelId\gdut-net，默认值
@@ -179,26 +245,54 @@ pub fn run_tray() -> Result<()> {
     let snapshot: SharedSnapshot = Arc::new(Mutex::new(None));
 
     // 菜单在主线程创建；后台线程只经通道送状态文本。
-    let status_item = MenuItem::new("Status: Disconnected", false, None);
+    let status_item = MenuItem::new("Wired: Disconnected", false, None);
+    let sep1 = PredefinedMenuItem::separator();
+    let mode_exclusive =
+        CheckMenuItem::new("Wired only (auto wireless takeover)", true, true, None);
+    let mode_standby = CheckMenuItem::new("Wired + wireless standby", true, false, None);
+    let sep2 = PredefinedMenuItem::separator();
     let redial_item = MenuItem::new("Redial now", true, None);
     let panel_item = MenuItem::new("Details", true, None);
+    let sep3 = PredefinedMenuItem::separator();
     let quit_item = MenuItem::new("Exit", true, None);
 
     let menu = Menu::new();
-    menu.append_items(&[&status_item, &redial_item, &panel_item, &quit_item])
-        .context("Failed to build tray menu")?;
+    menu.append_items(&[
+        &status_item,
+        &sep1,
+        &mode_exclusive,
+        &mode_standby,
+        &sep2,
+        &redial_item,
+        &panel_item,
+        &sep3,
+        &quit_item,
+    ])
+    .context("Failed to build tray menu")?;
+
+    // 四种状态色图标预先建好；泵线程只做 set_icon 切换（muda/tray-icon
+    // 操作必须留在创建线程）。初值 Down 灰灯，与首个快照到达前的状态一致。
+    let icons: Vec<tray_icon::Icon> = IconKind::ALL
+        .iter()
+        .map(|kind| tray_icon::Icon::from_rgba(icon_rgba(kind.color()), 32, 32))
+        .collect::<Result<_, _>>()
+        .context("Failed to build tray icons")?;
 
     // tray-icon 要求：创建图标与跑事件循环必须在同一线程（Windows 上是
-    // win32 消息循环），主线程天然满足。
-    let icon = tray_icon::Icon::from_rgba(tray_icon_rgba(), 32, 32)
-        .context("Failed to build tray icon")?;
-    let _tray = tray_icon::TrayIconBuilder::new()
-        .with_tooltip("gdut-net — GDUT Wired Client")
-        .with_icon(icon)
+    // win32 消息循环），主线程天然满足。`tray` 必须保活：drop 会移除托盘
+    // 图标。
+    let tray = tray_icon::TrayIconBuilder::new()
+        .with_tooltip("gdut-net — Wired: Disconnected / WiFi: Off")
+        .with_icon(
+            icon_for(&icons, IconKind::Down)
+                .cloned()
+                .context("Failed to pick initial tray icon")?,
+        )
         .with_menu(Box::new(menu))
         .with_menu_on_left_click(true)
         .build()
         .map_err(|e| anyhow!("Failed to create tray icon: {e}"))?;
+    let mut last_kind = IconKind::Down;
 
     // IPC 线程 → 泵线程：状态文本；面板点击重拨也汇聚到泵线程统一发，
     // 避免两处并发建 PipeClient。
@@ -214,16 +308,6 @@ pub fn run_tray() -> Result<()> {
     }
 
     let menu_rx = MenuEvent::receiver();
-    let status_text = |state: Option<&StateSnapshot>| match state {
-        None => "Status: Disconnected".to_string(),
-        Some(s) => format!(
-            "Status: {}{}",
-            s.status_text(),
-            s.ip.as_deref()
-                .map(|ip| format!(" · IP {ip}"))
-                .unwrap_or_default()
-        ),
-    };
 
     loop {
         // 限时泵：排空 win32 消息后让主线程周期醒来，处理菜单事件通道与
@@ -234,11 +318,15 @@ pub fn run_tray() -> Result<()> {
         }
 
         while let Ok(event) = menu_rx.try_recv() {
-            if event.id == redial_item.id() {
+            if event.id == *mode_exclusive.id() {
+                send_set_mode(NetMode::WiredExclusive);
+            } else if event.id == *mode_standby.id() {
+                send_set_mode(NetMode::WiredPlusStandby);
+            } else if event.id == *redial_item.id() {
                 send_redial();
-            } else if event.id == panel_item.id() {
+            } else if event.id == *panel_item.id() {
                 panel::show(Arc::clone(&snapshot), panel_redial_tx.clone());
-            } else if event.id == quit_item.id() {
+            } else if event.id == *quit_item.id() {
                 std::process::exit(0);
             }
         }
@@ -253,11 +341,33 @@ pub fn run_tray() -> Result<()> {
         if let Some(text) = latest {
             status_item.set_text(text);
         }
-        // 快照缓存兜底刷新（文本通道丢消息时也能收敛）。
+        // 快照缓存兜底刷新（文本通道丢消息时也能收敛）：状态行、模式勾选、
+        // 图标/tooltip 变更才 set（幂等，且避免每拍 syscall 抖动）。
         if let Ok(guard) = snapshot.lock() {
-            let want = status_text(guard.as_ref());
-            if status_item.text() != want {
-                status_item.set_text(want);
+            let want_status = status_line(guard.as_ref());
+            if status_item.text() != want_status {
+                status_item.set_text(want_status);
+            }
+            let mode = guard.as_ref().map_or_else(NetMode::default, |s| s.mode);
+            mode_exclusive.set_checked(mode == NetMode::WiredExclusive);
+            mode_standby.set_checked(mode == NetMode::WiredPlusStandby);
+            let kind = icon_kind(guard.as_ref());
+            if kind != last_kind {
+                if let Some(icon) = icon_for(&icons, kind) {
+                    if let Err(e) = tray.set_icon(Some(icon.clone())) {
+                        log::warn!("Failed to update tray icon: {e}");
+                    }
+                }
+                let tooltip = match guard.as_ref() {
+                    None => "gdut-net — service not running".to_string(),
+                    Some(s) => format!(
+                        "gdut-net — Wired: {} / WiFi: {}",
+                        s.status_text(),
+                        s.wireless_text()
+                    ),
+                };
+                tray.set_tooltip(Some(tooltip)).ok();
+                last_kind = kind;
             }
         }
     }
@@ -265,6 +375,17 @@ pub fn run_tray() -> Result<()> {
 
 /// 发送 Redial 命令；失败记日志（服务大概率已停止，IPC 线程会 toast）。
 fn send_redial() {
+    send_cmd_logged("redial", Command::Redial);
+}
+
+/// 发送 SetMode 命令（托盘模式勾选项）；失败记日志，实际生效以服务端
+/// 下一条快照回显的 mode 为准（泵线程会重设勾选）。
+fn send_set_mode(mode: NetMode) {
+    send_cmd_logged("set mode", Command::SetMode { mode });
+}
+
+/// 单次命令发送：current_thread runtime + 连管道 + 发帧，失败只记日志。
+fn send_cmd_logged(what: &str, cmd: Command) {
     let result = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -272,11 +393,11 @@ fn send_redial() {
         .and_then(|rt| {
             rt.block_on(async {
                 let mut c = PipeClient::connect()?;
-                c.send_cmd(Command::Redial).await
+                c.send_cmd(cmd).await
             })
         });
     if let Err(e) = result {
-        log::warn!("Failed to send redial command: {e:#}");
+        log::warn!("Failed to send {what} command: {e:#}");
     }
 }
 
@@ -284,16 +405,7 @@ fn send_redial() {
 /// toast 后重试。所有 MenuItem 操作由泵线程完成，本线程不碰 muda。
 fn ipc_loop(snapshot: SharedSnapshot, status_tx: mpsc::Sender<String>) {
     let push_text = |snapshot: &SharedSnapshot| {
-        let text = snapshot.lock().ok().map(|g| match g.as_ref() {
-            None => "Status: Disconnected".to_string(),
-            Some(s) => format!(
-                "Status: {}{}",
-                s.status_text(),
-                s.ip.as_deref()
-                    .map(|ip| format!(" · IP {ip}"))
-                    .unwrap_or_default()
-            ),
-        });
+        let text = snapshot.lock().ok().map(|g| status_line(g.as_ref()));
         if let Some(text) = text {
             let _ = status_tx.send(text);
         }
