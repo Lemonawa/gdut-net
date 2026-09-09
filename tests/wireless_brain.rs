@@ -87,12 +87,43 @@ fn standby_ignores_wired_state() {
 fn kicked_reauths_immediately() {
     let mut b = brain();
     b.decide(&world(8, false, true, true, None));
-    b.decide(&world(9, false, true, true, None));
+    b.decide(&world(9, false, true, true, None)); // PortalAuth
     b.on_auth(true, "ok", 9);
     b.decide(&world(9, false, true, true, None)); // ProbeNow
     assert_eq!(
         b.decide(&world(10, false, true, true, Some(ProbeVerdict::Kicked))),
         Action::PortalAuth
+    );
+}
+
+/// 回归（T9 review Critical）：Kicked 触发重认证成功后，manager 必须以
+/// probe=None 供下一拍决策——Brain 侧契约是此时返回 ProbeNow 而非再次
+/// PortalAuth。若残留 Kicked（Online 相 Kicked 检查先于探测定时器），
+/// manager 会陷入 ~2s 一次的无限重认证循环。
+#[test]
+fn kicked_verdict_must_be_consumed_after_reauth() {
+    let mut b = brain();
+    b.decide(&world(8, false, true, true, None)); // Associate
+    b.decide(&world(9, false, true, true, None)); // PortalAuth
+    b.on_auth(true, "ok", 9); // Online
+    b.decide(&world(9, false, true, true, None)); // ProbeNow
+    assert_eq!(
+        b.decide(&world(10, false, true, true, Some(ProbeVerdict::Kicked))),
+        Action::PortalAuth
+    );
+    // Re-auth succeeds: Online again, probe timer reset.
+    b.on_auth(true, "re-login ok", 10);
+    // Manager cleared the cached verdict (probe=None), so the Brain must
+    // demand a fresh probe here -- a stale Kicked would re-trigger PortalAuth
+    // and pin the manager in a ~2s re-auth loop (review Critical).
+    assert_eq!(
+        b.decide(&world(10, false, true, true, None)),
+        Action::ProbeNow
+    );
+    // 收到 Alive 后回归稳态：不再认证、按定时器探测。
+    assert_eq!(
+        b.decide(&world(11, false, true, true, Some(ProbeVerdict::Alive))),
+        Action::None
     );
 }
 

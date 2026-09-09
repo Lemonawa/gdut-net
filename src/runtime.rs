@@ -324,10 +324,15 @@ mod win {
                 Action::PortalAuth => {
                     let Some(a) = wlan.as_ref() else {
                         brain.on_auth(false, "wlan ip lost", now());
+                        // 认证尝试已使缓存探测结论失效，须清：Online 相的
+                        // Kicked 检查先于探测定时器，残留 Kicked 会把
+                        // manager 钉进无限重认证循环（review Critical）。
+                        verdict = None;
                         continue;
                     };
                     let Some(gw) = a.gateway else {
                         brain.on_auth(false, "wlan gateway missing", now());
+                        verdict = None;
                         continue;
                     };
                     guard.ensure(&[portal_ip, probe_ip], gw, a.ifindex);
@@ -366,6 +371,10 @@ mod win {
                         ev(&ev_tx, &format!("Wireless: portal login failed: {msg}"));
                     }
                     brain.on_auth(ok, &msg, now());
+                    // 认证成功后 Brain 的探测定时器已复位（last_probe_at=None
+                    // → 下一拍 ProbeNow），此处同步清缓存结论，让下一拍用
+                    // 新鲜探测数据而非过期 Kicked 再触发一次 PortalAuth。
+                    verdict = None;
                 }
                 Action::ProbeNow => {
                     let Some(a) = wlan.as_ref() else {
