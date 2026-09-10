@@ -12,7 +12,7 @@ fn urlencode_keeps_unreserved_and_encodes_specials() {
 fn login_url_contains_eportal_fields() {
     let url = build_login_url(
         "http://10.0.3.2:801/eportal/portal/login",
-        "3126006414",
+        "1145141919",
         "p@ss",
         Ipv4Addr::new(10, 43, 199, 166),
         "172.16.254.2",
@@ -20,7 +20,7 @@ fn login_url_contains_eportal_fields() {
     assert!(url.starts_with("http://10.0.3.2:801/eportal/portal/login?"));
     assert!(url.contains("callback=dr1004"));
     assert!(url.contains("login_method=1"));
-    assert!(url.contains("user_account=3126006414"));
+    assert!(url.contains("user_account=1145141919"));
     assert!(url.contains("user_password=p%40ss"));
     assert!(url.contains("wlan_user_ip=10.43.199.166"));
     assert!(url.contains("wlan_user_mac=000000000000"));
