@@ -143,11 +143,19 @@ impl RouteGuard {
     }
 
     fn restore_metric(&mut self) {
-        if let Some((ifindex, metric, auto)) = self.saved_metric.take() {
+        if let Some(&(ifindex, metric, auto)) = self.saved_metric.as_ref() {
             if let Err(e) = set_metric(ifindex, metric) {
-                log::warn!("RouteGuard restore metric if{ifindex} -> {metric} failed: {e:#}");
+                // 还原失败：保留 saved_metric（下次还原/teardown 重试）并清
+                // applied 标志，让下一个 standby 拍重新压制而非永久短路
+                // （回滚铁律：失败不吞状态）。
+                log::warn!(
+                    "RouteGuard restore metric if{ifindex} -> {metric} failed (kept for retry): {e:#}"
+                );
+                self.applied_metric_ifindex = None;
                 return;
             }
+            self.saved_metric = None;
+            log::info!("RouteGuard restored metric if{ifindex} -> {metric}");
             // UseAutomaticMetric 还原（auto 时交还系统）
             if auto {
                 let mut row = MIB_IPINTERFACE_ROW::default();
