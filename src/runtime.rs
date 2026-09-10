@@ -279,6 +279,10 @@ mod win {
         let mut guard = routes::RouteGuard::new();
         let mut join_since: Option<u64> = None;
         let mut verdict: Option<ProbeVerdict> = None;
+        log::info!(
+            "Wireless manager started (mode {:?}, portal {portal_ip}, probe {probe_ip})",
+            *mode_rx.borrow()
+        );
         let ev = |tx: &mpsc::Sender<String>, msg: &str| {
             let _ = tx.try_send(msg.to_string());
         };
@@ -555,8 +559,19 @@ mod win {
             let mstop = stop.child_token();
             let ev_tx = ev_tx.clone();
             let m_wl_tx = wl_tx.clone();
-            tokio::spawn(async move {
+            // 诊断保险：panic 不能静默——tokio 会把 panic 吞进 JoinHandle，
+            // 2026-09-10 真机事故（cleanup_stale 越界）就是这样丢的 manager。
+            let handle = tokio::spawn(async move {
                 wireless_manager(mcfg, mstop, mode_rx, wired_rx, m_wl_tx, ev_tx).await;
+            });
+            tokio::spawn(async move {
+                match handle.await {
+                    Ok(()) => log::info!("Wireless manager task finished"),
+                    Err(e) if e.is_panic() => {
+                        log::error!("Wireless manager PANICKED (wireless disabled): {e}")
+                    }
+                    Err(e) => log::warn!("Wireless manager task join error: {e}"),
+                }
             });
         }
 
@@ -595,8 +610,14 @@ mod win {
                         Some(Command::SetMode { mode }) => {
                             log::info!("IPC command: set mode {}", mode_text(mode));
                             // 最新胜（watch replace 语义）+ 落盘（失败仅警告：
-                            // 模式切换不因磁盘问题被拒）。
-                            let _ = mode_tx.send(mode);
+                            // 模式切换不因磁盘问题被拒）。send 失败 = manager
+                            // 已死（无接收者），必须显式记录而非静默——真机
+                            // 2026-09-10 教训。
+                            if mode_tx.send(mode).is_err() {
+                                log::error!(
+                                    "SetMode failed: wireless manager not running (receiver dropped)"
+                                );
+                            }
                             cfg.wireless.mode = mode;
                             if let Err(e) = cfg.save(&cfg_path) {
                                 log::warn!("Failed to persist mode to config (ignored): {e:#}");

@@ -199,8 +199,11 @@ pub fn cleanup_stale(dests: &[Ipv4Addr]) {
         return;
     }
     let n = unsafe { (*table).NumEntries } as usize;
-    for i in 0..n {
-        let row = unsafe { &(*table).Table[i] };
+    // 定长字段 [MIB_IPFORWARD_ROW2; 1] 不能直接索引（>1 条路由即越界 panic，
+    // 与 wlan.rs InterfaceInfo 同一教训——2026-09-10 真机：本机 ~100 条路由，
+    // manager 启动即崩且 tokio 静默吞掉）。用变长视图读整个表。
+    let rows = unsafe { std::slice::from_raw_parts((*table).Table.as_ptr(), n) };
+    for row in rows {
         if row.Protocol != MIB_IPPROTO_NETMGMT || row.DestinationPrefix.PrefixLength != 32 {
             continue;
         }
