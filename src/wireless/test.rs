@@ -66,11 +66,20 @@ pub fn cli_test(cfg_path: &Path) -> Result<()> {
         &cfg.wireless.wlan_ac_ip,
     );
     println!("GET {}", portal::redact_query(&url));
-    // portal_get 是 async（spawn_blocking 内部实现）；CLI 同步上下文一次性调用。
-    let reply = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()?
-        .block_on(portal::portal_get(adapter.ipv4, &url));
+    // 绑源 SYN 偶发被丢（diag 2026-09-10）：单次尝试不可靠，连试三次。
+    let mut reply = None;
+    for attempt in 1..=3 {
+        let r = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()?
+            .block_on(portal::portal_get(adapter.ipv4, &url));
+        if r.is_some() {
+            reply = r;
+            break;
+        }
+        println!("No reply (attempt {attempt}/3), retrying ...");
+        std::thread::sleep(Duration::from_secs(2));
+    }
     match reply {
         Some((code, body)) => {
             println!("HTTP {code}");

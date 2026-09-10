@@ -83,7 +83,9 @@ mod win {
     use socket2::{Domain, Protocol, Socket, Type};
     use tokio::task::spawn_blocking;
 
-    const TIMEOUT: Duration = Duration::from_secs(3);
+    // 8s：真机实测（2026-09-10）绑源 SYN 偶发被丢（30s 关联年龄下仍 t+34s
+    // 失败 / t+40s 成功），Windows SYN 重传 1s/2s/4s 三连，3s 会拦腰截断。
+    const TIMEOUT: Duration = Duration::from_secs(8);
     const MAX_RESPONSE: u64 = 64 * 1024;
     /// 与已实证脚本一致的 UA（requests 默认值）；设备计数按 MAC+UA（CONTEXT.md），别乱换。
     const PORTAL_UA: &str = "python-requests/2.31.0";

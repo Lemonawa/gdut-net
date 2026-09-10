@@ -57,7 +57,9 @@ mod win {
     const NOTIFY_THROTTLE: Duration = Duration::from_secs(30 * 60);
     /// 单次 eportal 认证墙钟上限：portal_get 内部虽有 3s 级超时，但整体
     /// 兜底防挂死会话把 Brain 卡在 Authing（T4 review carry-forward）。
-    const PORTAL_AUTH_TIMEOUT: Duration = Duration::from_secs(10);
+    // 真机（2026-09-10）：绑源 SYN 偶发被丢，单次 socket 尝试含 8s 超时 +
+    // SYN 重传；10s 外层兜底改 20s 给足重传余量（Brain 侧还有 5/15/30 退避）。
+    const PORTAL_AUTH_TIMEOUT: Duration = Duration::from_secs(20);
 
     /// RasSession 句柄包装：HRASCONN 是不透明指针（*mut c_void），Win32 RAS
     /// 句柄不线程亲和，单一所有者顺序使用下跨线程移动安全。
