@@ -1653,6 +1653,8 @@ pub fn delete_service() -> Result<()> {
 
 - [ ] **Step 2: Implement `src/setup/work.rs`:**
 
+> **Ruling R7 (post-review):** `install_state` returns the raw service command line (exe + args) in `service_exe`; rollback must NOT pass it to `create_service` blindly. Add a pure, Linux-tested `src/cmdline.rs::first_token(line) -> &str` (quote-aware first-token split), have `install_state` return the parsed exe path, and on query_config failure mark the service as "existed but unknown path" so rollback never blindly `delete_service()`; after restore/delete, best-effort `start_service()`. `Ev::Done` must carry the rollback outcome so the UI never claims a rollback that did not happen.
+
 ```rust
 //! 安装/修复/启动服务的工作流（后台线程 + 步骤事件 + 失败回滚）。
 
