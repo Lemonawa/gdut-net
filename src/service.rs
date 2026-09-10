@@ -56,6 +56,8 @@ mod win {
     pub struct InstallOutcome {
         pub student_id: String,
         pub cfg_path: PathBuf,
+        /// true = 服务已存在、配置被刷新（CLI 回显旧行）；false = 新建。
+        pub service_refreshed: bool,
     }
 
     /// 安装态查询结果（setup 维护页 / 失败回滚用）。
@@ -65,6 +67,28 @@ mod win {
             service_exe: PathBuf,
             version: Option<String>,
         },
+    }
+
+    /// 卸载分步结果：Done=执行成功，Skipped=幂等跳过，Failed=失败但被容忍。
+    pub enum Step {
+        Done,
+        Skipped,
+        Failed(String),
+    }
+
+    /// purge 步骤结果（目录供调用方回显）。
+    pub struct PurgeStep {
+        pub dir: PathBuf,
+        pub step: Step,
+    }
+
+    /// 卸载分步报告：uninstall_core 不打印，由 CLI/setup 渲染。
+    pub struct UninstallReport {
+        pub service: Step,
+        pub event_source: Step,
+        pub entropy: Step,
+        pub autostart: Step,
+        pub purge: Option<PurgeStep>,
     }
 
     /// install 入口（`gdut-net install [--keep-password]`）：提示与输出在壳内，核心不打印。
@@ -98,7 +122,10 @@ mod win {
             tray_exe: std::env::current_exe()?,
         })?;
 
-        // 旧输出逐字保留；拨号条目信息从落盘配置重读。
+        // 旧输出逐字保留（服务已存在时先回显 create_service 的旧行）；拨号条目信息从落盘配置重读。
+        if outcome.service_refreshed {
+            println!("Service already exists, config refreshed");
+        }
         let cfg = Config::load(&outcome.cfg_path)?;
         println!("Tray autostart: HKCU\\...\\Run\\gdut-net-tray");
         println!("Install complete:");
@@ -169,7 +196,7 @@ mod win {
             &password,
         )?;
 
-        create_service(&req.cfg_path, &req.service_exe)
+        let service_refreshed = create_service(&req.cfg_path, &req.service_exe)
             .context("Failed to create/update service")?;
         if let Err(e) = set_recovery_actions() {
             log::warn!("Failed to set service recovery actions (ignored): {e:#}");
@@ -181,6 +208,7 @@ mod win {
         Ok(InstallOutcome {
             student_id: cfg.account.student_id.clone(),
             cfg_path: req.cfg_path,
+            service_refreshed,
         })
     }
 
@@ -217,20 +245,50 @@ mod win {
         }
     }
 
-    /// uninstall 入口（`gdut-net uninstall [--purge]`）：管理员校验在壳内，核心静默（日志在 stderr）。
+    /// uninstall 入口（`gdut-net uninstall [--purge]`）：管理员校验 + 旧版回显都在壳内。
     pub fn uninstall(cfg_path: &Path, purge: bool) -> Result<()> {
         require_admin()?;
-        uninstall_core(cfg_path, purge)
+        let report = uninstall_core(cfg_path, purge)?;
+        match report.service {
+            Step::Done => println!("Service removed"),
+            Step::Skipped => println!("Service not found, skipping"),
+            // service 失败走 Err（不会进报告）；此臂仅为穷尽匹配。
+            Step::Failed(e) => eprintln!("Failed to remove service (ignored): {e}"),
+        }
+        match report.event_source {
+            Step::Done => println!("Event source removed"),
+            Step::Failed(e) => eprintln!("Failed to remove event source (ignored): {e}"),
+            Step::Skipped => {}
+        }
+        match report.entropy {
+            Step::Done => println!("Entropy removed"),
+            Step::Failed(e) => eprintln!("Failed to remove entropy (ignored): {e}"),
+            Step::Skipped => {}
+        }
+        match report.autostart {
+            Step::Done => println!("Tray autostart removed"),
+            Step::Failed(e) => eprintln!("Failed to remove tray autostart (ignored): {e}"),
+            Step::Skipped => {}
+        }
+        if let Some(PurgeStep { dir, step }) = report.purge {
+            match step {
+                Step::Done => println!("Removed {}", dir.display()),
+                Step::Skipped => println!("{} not found, skipping", dir.display()),
+                // purge 失败走 Err（不会进报告）。
+                Step::Failed(e) => eprintln!("Failed to remove {} (ignored): {e}", dir.display()),
+            }
+        }
+        Ok(())
     }
 
-    /// 卸载核心：每步幂等宽容；不打印（CLI 日志与 setup 共用）。
-    pub fn uninstall_core(cfg_path: &Path, purge: bool) -> Result<()> {
+    /// 卸载核心：每步幂等宽容、不打印；回显由调用方按 [`UninstallReport`] 渲染。
+    pub fn uninstall_core(cfg_path: &Path, purge: bool) -> Result<UninstallReport> {
         let manager = ServiceManager::local_computer(None::<&str>, ServiceManagerAccess::CONNECT)
             .context("Failed to connect to service manager (administrator required)")?;
 
         let service_access =
             ServiceAccess::QUERY_STATUS | ServiceAccess::STOP | ServiceAccess::DELETE;
-        match manager.open_service(SERVICE_NAME, service_access) {
+        let service = match manager.open_service(SERVICE_NAME, service_access) {
             Ok(service) => {
                 if service.query_status()?.current_state != ServiceState::Stopped {
                     // stop 失败不中断：wait_stopped 兜底判定真实状态。
@@ -240,42 +298,50 @@ mod win {
                     wait_stopped(&service)?;
                 }
                 service.delete().context("Failed to delete service")?;
-                log::info!("Service removed");
+                Step::Done
             }
             // 仅"Service not found"属幂等场景；拒绝访问等真实错误照常上抛。
             Err(windows_service::Error::Winapi(e))
                 if e.raw_os_error() == Some(ERROR_SERVICE_DOES_NOT_EXIST.0 as i32) =>
             {
-                log::info!("Service not found, skipping")
+                Step::Skipped
             }
             Err(e) => return Err(anyhow!("Failed to open service: {e}")),
-        }
+        };
 
-        match eventlog::unregister_source() {
-            Ok(()) => log::info!("Event source removed"),
-            Err(e) => log::warn!("Failed to remove event source (ignored): {e}"),
-        }
-        match crate::crypto::delete_entropy() {
-            Ok(()) => log::info!("Entropy removed"),
-            Err(e) => log::warn!("Failed to remove entropy (ignored): {e}"),
-        }
-        match crate::tray::unregister_autostart() {
-            Ok(()) => log::info!("Tray autostart removed"),
-            Err(e) => log::warn!("Failed to remove tray autostart (ignored): {e}"),
-        }
+        let event_source = match eventlog::unregister_source() {
+            Ok(()) => Step::Done,
+            Err(e) => Step::Failed(e.to_string()),
+        };
+        let entropy = match crate::crypto::delete_entropy() {
+            Ok(()) => Step::Done,
+            Err(e) => Step::Failed(e.to_string()),
+        };
+        let autostart = match crate::tray::unregister_autostart() {
+            Ok(()) => Step::Done,
+            Err(e) => Step::Failed(e.to_string()),
+        };
 
-        if purge {
+        let purge = if purge {
             let dir = program_data_dir(cfg_path);
             ensure_purge_safe(&dir)?;
-            match std::fs::remove_dir_all(&dir) {
-                Ok(()) => log::info!("Removed {}", dir.display()),
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                    log::info!("{} not found, skipping", dir.display())
-                }
+            let step = match std::fs::remove_dir_all(&dir) {
+                Ok(()) => Step::Done,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => Step::Skipped,
                 Err(e) => return Err(anyhow!("Failed to remove {}: {e}", dir.display())),
-            }
-        }
-        Ok(())
+            };
+            Some(PurgeStep { dir, step })
+        } else {
+            None
+        };
+
+        Ok(UninstallReport {
+            service,
+            event_source,
+            entropy,
+            autostart,
+            purge,
+        })
     }
 
     /// 停止服务；未安装时 no-op。超时未停稳报错（调用方决定是否回滚）。
@@ -484,7 +550,8 @@ mod win {
         }
     }
 
-    fn create_service(cfg_path: &Path, service_exe: &Path) -> Result<()> {
+    /// 创建/更新服务；返回 true = 服务已存在、配置被刷新（旧 CLI 行由壳回显，核心不打印）。
+    fn create_service(cfg_path: &Path, service_exe: &Path) -> Result<bool> {
         let manager = ServiceManager::local_computer(
             None::<&str>,
             ServiceManagerAccess::CONNECT | ServiceManagerAccess::CREATE_SERVICE,
@@ -508,8 +575,8 @@ mod win {
             account_password: None,
         };
         // 幂等：已存在（1073）不报错——先 stop 再 update_config 刷新二进制路径/参数，重装场景友好。
-        match manager.create_service(&info, ServiceAccess::CHANGE_CONFIG) {
-            Ok(_) => {}
+        let refreshed = match manager.create_service(&info, ServiceAccess::CHANGE_CONFIG) {
+            Ok(_) => false,
             Err(windows_service::Error::Winapi(e))
                 if e.raw_os_error() == Some(ERROR_SERVICE_EXISTS.0 as i32) =>
             {
@@ -529,16 +596,17 @@ mod win {
                 existing
                     .change_config(&info)
                     .context("Service already exists, failed to update config")?;
-                println!("Service already exists, config refreshed");
+                true
             }
             Err(e) => return Err(anyhow!("Failed to create service: {e}")),
-        }
-        Ok(())
+        };
+        Ok(refreshed)
     }
 
     /// 安装失败回滚：把服务重新指回旧 exe（不重写配置）。
     pub fn restore_service_path(cfg_path: &Path, service_exe: &Path) -> Result<()> {
-        create_service(cfg_path, service_exe)
+        create_service(cfg_path, service_exe)?;
+        Ok(())
     }
 
     /// 回滚新建失败的服务：删除（不存在视为成功）。
@@ -610,7 +678,7 @@ mod win {
 pub use win::{
     delete_service, existing_account, install, install_core, install_state, restore_service_path,
     service_main, start_service, stop_service, uninstall, uninstall_core, Credential,
-    InstallOutcome, InstallRequest, InstallState,
+    InstallOutcome, InstallRequest, InstallState, PurgeStep, Step, UninstallReport,
 };
 
 #[cfg(windows)]
