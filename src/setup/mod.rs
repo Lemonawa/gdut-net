@@ -11,8 +11,9 @@ pub mod ui;
 // `pub mod work;` lands here in Task 8.
 
 pub use crate::setup_args::{Mode, SetupArgs};
+// 定义在 shell.rs（shell 不反向依赖 setup，避免模块环）；此处 re-export 供 UI/工作流使用。
+pub use crate::shell::START_MENU_FOLDER;
 
-pub const START_MENU_FOLDER: &str = "GDUT Net";
 pub const DATA_DIR: &str = r"C:\ProgramData\gdut-net";
 
 /// 安装目录：%ProgramFiles%\gdut-net。

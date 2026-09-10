@@ -23,6 +23,8 @@ pub mod service;
 pub mod setup;
 pub mod setup_args;
 #[cfg(windows)]
+pub mod shell;
+#[cfg(windows)]
 pub mod tray;
 pub mod watchdog;
 pub mod wireless;

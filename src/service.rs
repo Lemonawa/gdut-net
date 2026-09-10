@@ -223,11 +223,11 @@ mod win {
             Ok(svc) => match svc.query_config() {
                 Ok(c) => InstallState::Installed {
                     service_exe: c.executable_path,
-                    version: None,
+                    version: crate::shell::installed_version(),
                 },
                 Err(_) => InstallState::Installed {
                     service_exe: PathBuf::new(),
-                    version: None,
+                    version: crate::shell::installed_version(),
                 },
             },
             Err(_) => InstallState::NotInstalled,
@@ -321,6 +321,11 @@ mod win {
             Ok(()) => Step::Done,
             Err(e) => Step::Failed(e.to_string()),
         };
+        // shell 集成清理：快捷方式与卸载键一起移除；失败仅告警（老机器没有集成，
+        // remove_shell_integration 本身对缺失键/目录已幂等）。
+        if let Err(e) = crate::shell::remove_shell_integration() {
+            log::warn!("Failed to remove shell integration (ignored): {e:#}");
+        }
 
         let purge = if purge {
             let dir = program_data_dir(cfg_path);
