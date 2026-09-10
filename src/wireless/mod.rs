@@ -16,6 +16,21 @@ pub const AUTH_RETRY_DELAYS: [u64; 3] = [5, 15, 30];
 /// Joining 相位等 IP/关联超时（manager 判定后调 restart）。
 pub const JOIN_TIMEOUT_SECS: u64 = 60;
 
+/// IPv4 → Windows `SOCKADDR_IN.sin_addr.S_addr` 期望的数值表示。
+///
+/// Win32 要求 S_addr 的内存字节为网络序（点分顺序）。`u32::from(ip)` 是
+/// 大端数值（10.0.3.2 → 0x0A000302），直接存入 LE 内存会变成字节
+/// [02,03,00,0A] → 路由表里出现 2.3.0.10（2026-09-10 真机实测翻车）。
+/// `to_be()` 在 LE 上交换字节、在 BE 上原样，两端都得到正确的内存布局。
+pub fn ipv4_to_s_addr(ip: std::net::Ipv4Addr) -> u32 {
+    u32::from(ip).to_be()
+}
+
+/// [`ipv4_to_s_addr`] 的逆：S_addr 数值 → IPv4。
+pub fn s_addr_to_ipv4(v: u32) -> std::net::Ipv4Addr {
+    std::net::Ipv4Addr::from(v.to_be())
+}
+
 /// manager 每拍采集的世界状态（纯数据）。
 #[derive(Debug, Clone, Default)]
 pub struct World {

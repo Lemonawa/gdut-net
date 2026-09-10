@@ -22,7 +22,8 @@ fn sockaddr_in4(ip: Ipv4Addr) -> SOCKADDR_INET {
             sin_family: AF_INET,
             sin_addr: IN_ADDR {
                 S_un: IN_ADDR_0 {
-                    S_addr: u32::from(ip),
+                    // 必须网络序（见 wireless::ipv4_to_s_addr 的教训注释）。
+                    S_addr: crate::wireless::ipv4_to_s_addr(ip),
                 },
             },
             ..Default::default()
@@ -203,9 +204,11 @@ pub fn cleanup_stale(dests: &[Ipv4Addr]) {
         if row.Protocol != MIB_IPPROTO_NETMGMT || row.DestinationPrefix.PrefixLength != 32 {
             continue;
         }
-        let hop_ip = Ipv4Addr::from(unsafe { row.NextHop.Ipv4.sin_addr.S_un.S_addr });
-        let dest_ip =
-            Ipv4Addr::from(unsafe { row.DestinationPrefix.Prefix.Ipv4.sin_addr.S_un.S_addr });
+        let hop_ip =
+            crate::wireless::s_addr_to_ipv4(unsafe { row.NextHop.Ipv4.sin_addr.S_un.S_addr });
+        let dest_ip = crate::wireless::s_addr_to_ipv4(unsafe {
+            row.DestinationPrefix.Prefix.Ipv4.sin_addr.S_un.S_addr
+        });
         if dests.contains(&dest_ip) {
             if let Err(e) = del(dest_ip, hop_ip, row.InterfaceIndex) {
                 log::warn!("cleanup_stale del {dest_ip} failed: {e:#}");
