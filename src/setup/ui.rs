@@ -58,7 +58,17 @@ pub(crate) enum Page {
     Done,
     Maintenance,
     UninstallConfirm,
+    UninstallDone,
     StartService,
+}
+
+/// 小票行状态（安装/卸载共用）。
+pub(crate) enum StepStatus {
+    /// 已开始、未完成。
+    Running,
+    Done,
+    Skipped,
+    Failed(String),
 }
 
 pub(crate) struct SetupApp {
@@ -74,12 +84,16 @@ pub(crate) struct SetupApp {
     /// 已有可用密文时填入学号（`service::existing_account`）。
     pub(crate) has_existing: Option<String>,
     pub(crate) rx: Option<Receiver<work::Ev>>,
-    /// 步骤行（名称，完成）。
-    pub(crate) steps: Vec<(String, bool)>,
+    /// 步骤行（名称，状态）。
+    pub(crate) steps: Vec<(String, StepStatus)>,
     pub(crate) result: Option<Result<(), String>>,
     /// 失败时的回滚实情（完成页据此陈述，不得默认"已回滚"）。
     pub(crate) rollback: Option<work::RollbackOutcome>,
     pub(crate) status_line: Option<String>,
+    /// 当前流程是否为卸载（决定 Progress → UninstallDone 与小票文案）。
+    pub(crate) uninstalling: bool,
+    /// 卸载确认页的 "同时删除配置与日志" 勾选，默认 OFF。
+    pub(crate) purge: bool,
 }
 
 impl SetupApp {
@@ -87,7 +101,12 @@ impl SetupApp {
         // 模式定初始页（spec §5）：--repair 定位修复、--uninstall 定位卸载、
         // --start-service 直接走启动流程；无参按安装态进向导或维护页。
         let page = match args.mode().unwrap_or(Mode::Gui) {
-            Mode::Repair | Mode::Uninstall => Page::Maintenance,
+            Mode::Repair => Page::Maintenance,
+            // 开始菜单"卸载 GDUT Net"/应用和功能入口：已安装直接进卸载确认。
+            Mode::Uninstall => match state {
+                InstallState::Installed { .. } => Page::UninstallConfirm,
+                InstallState::NotInstalled => Page::Maintenance,
+            },
             Mode::StartService => Page::StartService,
             _ => match state {
                 InstallState::Installed { .. } => Page::Maintenance,
@@ -110,6 +129,8 @@ impl SetupApp {
             result: None,
             rollback: None,
             status_line: None,
+            uninstalling: false,
+            purge: false,
         }
     }
 
@@ -120,6 +141,7 @@ impl SetupApp {
         self.result = None;
         self.rollback = None;
         self.status_line = None;
+        self.uninstalling = false;
         let (tx, rx) = std::sync::mpsc::channel();
         self.rx = Some(rx);
         self.page = Page::Progress;
@@ -135,6 +157,21 @@ impl SetupApp {
         );
     }
 
+    /// 拉起卸载工作线程（UninstallConfirm「卸载」）。
+    fn start_uninstall(&mut self) {
+        self.error = None;
+        self.steps.clear();
+        self.result = None;
+        self.rollback = None;
+        self.status_line = None;
+        self.uninstalling = true;
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.rx = Some(rx);
+        self.page = Page::Progress;
+        // remove_dir=true：真正删安装目录的是 shell 的延迟删除助手。
+        work::spawn_uninstall(tx, self.purge, true);
+    }
+
     /// 拉取工作线程事件；Progress 与 StartService 共用。
     /// 返回 Done 事件的结果（由调用方决定跳转哪个页面）。
     fn drain_events(&mut self) -> Option<Result<(), String>> {
@@ -142,19 +179,30 @@ impl SetupApp {
         if let Some(rx) = &self.rx {
             loop {
                 match rx.try_recv() {
-                    Ok(work::Ev::Step(label)) => self.steps.push((label, false)),
+                    Ok(work::Ev::Step(label)) => self.steps.push((label, StepStatus::Running)),
                     Ok(work::Ev::StepDone(label)) => {
                         // 标记同名步骤完成；带括号补充文本的按前缀匹配。
-                        for (l, step_done) in self.steps.iter_mut().rev() {
-                            if label.starts_with(l.as_str()) {
-                                *step_done = true;
-                                *l = label.clone();
-                                break;
-                            }
+                        if let Some(i) = self.find_running(&label) {
+                            self.steps[i].0 = label.clone();
+                            self.steps[i].1 = StepStatus::Done;
                         }
                         // 拨号结果补充行（"等待拨号结果（Connected）"）留给完成页展示。
                         if label.starts_with("等待拨号结果") {
                             self.status_line = Some(label);
+                        }
+                    }
+                    Ok(work::Ev::StepFinished { label, outcome }) => {
+                        // 卸载报告行：uninstall_core 返回后由 worker 逐行翻译（核心不打印）。
+                        let status = match outcome {
+                            work::StepOutcome::Done => StepStatus::Done,
+                            work::StepOutcome::Skipped => StepStatus::Skipped,
+                            work::StepOutcome::Failed(e) => StepStatus::Failed(e),
+                        };
+                        if let Some(i) = self.find_running(&label) {
+                            self.steps[i].0 = label;
+                            self.steps[i].1 = status;
+                        } else {
+                            self.steps.push((label, status));
                         }
                     }
                     Ok(work::Ev::Done { result, rollback }) => {
@@ -165,7 +213,12 @@ impl SetupApp {
                     Err(std::sync::mpsc::TryRecvError::Empty) => break,
                     Err(std::sync::mpsc::TryRecvError::Disconnected) => {
                         if done.is_none() {
-                            done = Some(Err("安装线程意外退出，请查看日志。".to_string()));
+                            let what = if self.uninstalling {
+                                "卸载"
+                            } else {
+                                "安装"
+                            };
+                            done = Some(Err(format!("{what}线程意外退出，请查看日志。")));
                         }
                         break;
                     }
@@ -173,6 +226,13 @@ impl SetupApp {
             }
         }
         done
+    }
+
+    /// 最近一个"事件标签前缀匹配"的运行中步骤下标（StepDone/StepFinished 共用）。
+    fn find_running(&self, label: &str) -> Option<usize> {
+        self.steps.iter().rposition(|(l, status)| {
+            matches!(status, StepStatus::Running) && label.starts_with(l.as_str())
+        })
     }
 }
 
@@ -201,6 +261,7 @@ impl eframe::App for SetupApp {
                 Page::Done => self.done_page(ui),
                 Page::Maintenance => self.maintenance_page(ui),
                 Page::UninstallConfirm => self.uninstall_confirm_page(ui),
+                Page::UninstallDone => self.uninstall_done_page(ui),
                 Page::StartService => self.start_service_page(ui),
             }
         });
@@ -287,10 +348,19 @@ impl SetupApp {
     fn progress_page(&mut self, ui: &mut egui::Ui) {
         if let Some(result) = self.drain_events() {
             self.result = Some(result);
-            self.page = Page::Done;
+            self.page = if self.uninstalling {
+                Page::UninstallDone
+            } else {
+                Page::Done
+            };
         }
+        let (card, busy) = if self.uninstalling {
+            ("销卡中", "正在卸载，请勿关闭窗口…")
+        } else {
+            ("发卡中", "正在处理，请勿关闭窗口…")
+        };
         ui.horizontal_top(|ui| {
-            self.card_preview(ui, "发卡中");
+            self.card_preview(ui, card);
             ui.add_space(16.0);
             ui.vertical(|ui| {
                 ui.set_width(280.0);
@@ -299,7 +369,7 @@ impl SetupApp {
                     ui.add_space(8.0);
                     ui.horizontal(|ui| {
                         ui.spinner();
-                        ui.label("正在处理，请勿关闭窗口…");
+                        ui.label(busy);
                     });
                 }
             });
@@ -440,7 +510,8 @@ impl SetupApp {
             }
             if matches!(self.state, InstallState::Installed { .. }) && ui.button("卸载").clicked()
             {
-                // Task 9 接上真实卸载（保留配置 / 彻底清除两档）。
+                // 每次进入确认页都从"不删除配置与日志"开始（防误勾选）。
+                self.purge = false;
                 self.page = Page::UninstallConfirm;
             }
         });
@@ -455,11 +526,117 @@ impl SetupApp {
     }
 
     fn uninstall_confirm_page(&mut self, ui: &mut egui::Ui) {
-        // Task 9 实现真实卸载（保留配置 / 彻底清除两档）。
-        ui.label("卸载向导将在下一个任务完成。");
+        ui.horizontal_top(|ui| {
+            self.card_preview(ui, "待销卡");
+            ui.add_space(16.0);
+            ui.vertical(|ui| {
+                ui.set_width(280.0);
+                ui.label("将停止后台服务，并移除开始菜单快捷方式与“应用和功能”条目。");
+                ui.add_space(10.0);
+                ui.checkbox(
+                    &mut self.purge,
+                    "同时删除配置与日志（含学号密码、拨号记录）",
+                );
+                ui.add_space(6.0);
+                if self.purge {
+                    ui.colored_label(
+                        VERMILION,
+                        "警告：删除后需重新输入学号和密码才能再次安装，历史日志无法恢复。",
+                    );
+                } else {
+                    ui.label("配置与日志将保留：重新安装时可直接使用现有密码。");
+                }
+            });
+        });
         ui.add_space(12.0);
-        if ui.button("返回").clicked() {
-            self.page = Page::Maintenance;
+        ui.separator();
+        ui.add_space(6.0);
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            let uninstall = egui::Button::new(
+                egui::RichText::new("卸载")
+                    .color(egui::Color32::WHITE)
+                    .strong(),
+            )
+            .fill(VERMILION);
+            if ui.add(uninstall).clicked() {
+                self.start_uninstall();
+            }
+            if ui.button("取消").clicked() {
+                self.page = Page::Maintenance;
+            }
+        });
+    }
+
+    fn uninstall_done_page(&mut self, ui: &mut egui::Ui) {
+        match self.result.clone() {
+            Some(Ok(())) => {
+                ui.horizontal_top(|ui| {
+                    self.card_preview(ui, "已销卡");
+                    ui.add_space(16.0);
+                    ui.vertical(|ui| {
+                        ui.set_width(280.0);
+                        self.receipt(ui);
+                        ui.add_space(6.0);
+                        ui.label(egui::RichText::new("卸载完成").color(READER_GREEN).strong());
+                        if self.purge {
+                            ui.label("配置与日志已删除。");
+                        } else {
+                            ui.label("配置与日志已保留。");
+                        }
+                        // 目录删除交给延迟助手，此刻不能声称"目录已不存在"。
+                        ui.label(
+                            "安装目录的删除已安排后台执行；若目录仍在，重启电脑后手动删除即可。",
+                        );
+                    });
+                });
+                ui.add_space(12.0);
+                ui.separator();
+                ui.add_space(6.0);
+                ui.horizontal(|ui| {
+                    if ui.button("关闭").clicked() {
+                        ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
+                    }
+                });
+            }
+            Some(Err(e)) => {
+                ui.horizontal_top(|ui| {
+                    self.card_preview(ui, "销卡失败");
+                    ui.add_space(16.0);
+                    ui.vertical(|ui| {
+                        ui.set_width(280.0);
+                        ui.colored_label(VERMILION, egui::RichText::new("卸载未完成").strong());
+                        ui.add_space(4.0);
+                        for line in e.lines() {
+                            ui.colored_label(VERMILION, line);
+                        }
+                        ui.add_space(6.0);
+                        ui.label("卸载是幂等的：可再次尝试；若问题依旧，请查看日志。");
+                    });
+                });
+                ui.add_space(12.0);
+                ui.separator();
+                ui.add_space(6.0);
+                ui.horizontal(|ui| {
+                    if ui.button("打开日志").clicked() {
+                        self.open_logs();
+                    }
+                    if ui.button("重试").clicked() {
+                        self.result = None;
+                        self.rx = None;
+                        self.page = Page::UninstallConfirm;
+                    }
+                    if ui.button("关闭").clicked() {
+                        ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
+                    }
+                });
+            }
+            None => {
+                // 理论到不了（Progress 收到 Done 才跳转）；给个稳妥的后退。
+                ui.label("没有可显示的卸载结果。");
+                if ui.button("返回").clicked() {
+                    self.page = Page::Maintenance;
+                }
+            }
         }
     }
 
@@ -592,15 +769,22 @@ impl SetupApp {
             .inner_margin(egui::Margin::same(10))
             .show(ui, |ui| {
                 ui.set_width(250.0);
-                ui.label(egui::RichText::new("安装小票").color(INK_BLACK).strong());
+                let title = if self.uninstalling {
+                    "销卡小票"
+                } else {
+                    "安装小票"
+                };
+                ui.label(egui::RichText::new(title).color(INK_BLACK).strong());
                 ui.add_space(4.0);
-                for (label, done) in &self.steps {
-                    let line = if *done {
-                        format!("✓ {label}")
-                    } else {
-                        format!("… {label}")
+                for (label, status) in &self.steps {
+                    let (line, color) = match status {
+                        StepStatus::Running => (format!("… {label}"), INK_BLACK),
+                        StepStatus::Done => (format!("✓ {label}"), READER_GREEN),
+                        StepStatus::Skipped => {
+                            (format!("跳过 {label}"), INK_BLACK.gamma_multiply(0.6))
+                        }
+                        StepStatus::Failed(e) => (format!("失败 {label}：{e}"), VERMILION),
                     };
-                    let color = if *done { READER_GREEN } else { INK_BLACK };
                     ui.colored_label(color, line);
                 }
                 if let Some(result) = &self.result {
@@ -608,9 +792,11 @@ impl SetupApp {
                     ui.label(
                         egui::RichText::new("- ".repeat(20)).color(INK_BLACK.gamma_multiply(0.45)),
                     );
-                    match result {
-                        Ok(()) => ui.colored_label(READER_GREEN, "发卡完成"),
-                        Err(_) => ui.colored_label(VERMILION, "发卡失败"),
+                    match (result, self.uninstalling) {
+                        (Ok(()), false) => ui.colored_label(READER_GREEN, "发卡完成"),
+                        (Ok(()), true) => ui.colored_label(READER_GREEN, "卸载完成"),
+                        (Err(_), false) => ui.colored_label(VERMILION, "发卡失败"),
+                        (Err(_), true) => ui.colored_label(VERMILION, "卸载失败"),
                     };
                 }
             });

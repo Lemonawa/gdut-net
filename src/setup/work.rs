@@ -13,12 +13,24 @@ use crate::setup::{config_path, install_dir, SetupArgs};
 pub enum Ev {
     Step(String),
     StepDone(String),
+    /// 带结局的一步（卸载报告翻译用）：UI 按 Done/Skipped/Failed 选 ✓/跳过/失败 文案。
+    StepFinished {
+        label: String,
+        outcome: StepOutcome,
+    },
     /// 工作流结束：`result` 是安装结果，`rollback` 是回滚实情。
     /// UI / silent 必须按 `rollback` 陈述，不得默认"已回滚"。
     Done {
         result: Result<(), String>,
         rollback: RollbackOutcome,
     },
+}
+
+/// `service::Step` 的 UI 侧镜像（Ev 不直接持有 service 内部类型）。
+pub enum StepOutcome {
+    Done,
+    Skipped,
+    Failed(String),
 }
 
 /// 失败后的回滚实情（UI/silent 据此说真话）。
@@ -56,7 +68,7 @@ fn load_payload() -> Result<Vec<crate::payload::Entry>> {
 }
 
 /// 杀掉旧托盘进程（镜像名 gdut-net.exe，不会命中 setup 自身）。
-fn kill_tray() {
+pub(crate) fn kill_tray() {
     use std::os::windows::process::CommandExt as _;
     let _ = std::process::Command::new("taskkill")
         .args(["/F", "/IM", "gdut-net.exe"])
@@ -214,6 +226,100 @@ fn rollback_for(prev: &PrevService) -> RollbackOutcome {
                 RollbackOutcome::Failed(format!("{e:#}"))
             }
         },
+    }
+}
+
+/// 卸载：停服务/托盘 → uninstall_core（报告逐行翻译）→ 安排删除安装目录。
+/// 卸载没有回滚概念：任何失败只记录并上报（幂等，可原样重试）。
+pub fn spawn_uninstall(tx: Sender<Ev>, purge: bool, remove_dir: bool) {
+    std::thread::Builder::new()
+        .name("gdut-net-setup-uninstall".into())
+        .spawn(move || run_uninstall(tx, purge, remove_dir))
+        .expect("Failed to spawn uninstall thread");
+}
+
+fn run_uninstall(tx: Sender<Ev>, purge: bool, remove_dir: bool) {
+    let result: Result<()> = (|| {
+        emit(&tx, Ev::Step("停止服务".into()));
+        service::stop_service(Duration::from_secs(16))?;
+        kill_tray();
+        emit(&tx, Ev::StepDone("停止服务".into()));
+
+        // uninstall_core 返回分步报告；此处按报告逐行翻译成 UI 行（核心不打印）。
+        let report = service::uninstall_core(&config_path(), purge)?;
+        emit(
+            &tx,
+            Ev::StepFinished {
+                label: "移除服务".into(),
+                outcome: outcome_of(report.service),
+            },
+        );
+        emit(
+            &tx,
+            Ev::StepFinished {
+                label: "移除事件源".into(),
+                outcome: outcome_of(report.event_source),
+            },
+        );
+        emit(
+            &tx,
+            Ev::StepFinished {
+                label: "移除加密密钥".into(),
+                outcome: outcome_of(report.entropy),
+            },
+        );
+        emit(
+            &tx,
+            Ev::StepFinished {
+                label: "移除托盘自启".into(),
+                outcome: outcome_of(report.autostart),
+            },
+        );
+        if let Some(purge_step) = report.purge {
+            emit(
+                &tx,
+                Ev::StepFinished {
+                    label: "删除配置与日志".into(),
+                    outcome: outcome_of(purge_step.step),
+                },
+            );
+        }
+
+        if remove_dir {
+            emit(&tx, Ev::Step("移除安装目录".into()));
+            crate::shell::schedule_install_dir_removal(&install_dir())?;
+            emit(&tx, Ev::StepDone("移除安装目录".into()));
+        }
+        Ok(())
+    })();
+
+    match result {
+        Ok(()) => emit(
+            &tx,
+            Ev::Done {
+                result: Ok(()),
+                rollback: RollbackOutcome::NotNeeded,
+            },
+        ),
+        Err(e) => {
+            log::error!("Uninstall failed: {e:#}");
+            emit(
+                &tx,
+                Ev::Done {
+                    result: Err(format!("{e:#}")),
+                    rollback: RollbackOutcome::NotNeeded,
+                },
+            );
+        }
+    }
+}
+
+/// `service::Step` → UI 结局（Failed 保留原因文本）。
+fn outcome_of(step: service::Step) -> StepOutcome {
+    match step {
+        service::Step::Done => StepOutcome::Done,
+        service::Step::Skipped => StepOutcome::Skipped,
+        service::Step::Failed(e) => StepOutcome::Failed(e),
     }
 }
 
