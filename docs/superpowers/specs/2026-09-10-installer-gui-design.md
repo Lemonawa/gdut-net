@@ -82,6 +82,7 @@ C:\ProgramData\gdut-net\  config.toml、gdut.pbk、logs\（不变）
 ## 6. 日常 GUI（托盘窗口）
 
 - **生命周期**：托盘进程常驻一扇 egui 窗口。首次打开创建；关窗 = 隐藏（`close_requested` → `ViewportCommand::Visible(false)`），不退出进程；左键托盘 = 显示并聚焦。右键菜单保留：打开主界面 / 模式两项 / 立即重拨 / 退出托盘。
+- **托盘日志**：GUI 子系统无 stderr，托盘进程日志写 `C:\ProgramData\gdut-net\logs\tray.log`（滚 5MB×2）；setup 同理写 `setup.log`。
 - **单实例**：命名互斥体。已在运行时，再启动（双击 exe、点开始菜单）经 `\\.\pipe\gdut-net-tray-show` 发单字节"显示"信号后退出，不产生第二个托盘图标。无参数双击且未安装 → 中文提示引导去 `gdut-net-setup.exe`；无参数且从控制台启动 → 维持现状（clap 行为），以 `GetConsoleWindow()` 是否为 NULL 区分。
 - **单页信息架构**（中文）：
   - 状态卡：状态词（已连接 / 重拨中 / 认证失败 / 无线接管中 / 服务未运行）+ 出口（有线 / 无线）+ IP + 在线时长 + 上次掉线原因 + 心跳状态；语义配色沿用托盘图标四色。
@@ -102,9 +103,8 @@ C:\ProgramData\gdut-net\  config.toml、gdut.pbk、logs\（不变）
 ## 8. 作者本机迁移（本次实现内执行）
 
 1. 构建 + 打包新 setup（本机 `cargo xwin`）。
-2. 提权迁移脚本（桌面 `迁移.bat` 自提权，双击触发一次 UAC；脚本自包含、幂等、带失败回滚）：
-   停服务 / 杀托盘 → 建安装目录、拷贝文件（新 exe、脚本、bak、说明）→ 改写个人脚本绝对路径 → 更新 Run / 计划任务 / 开始菜单 / 卸载项 → `gdut-net-setup.exe --silent --keep-password` → 起服务、等拨号 → 写迁移日志。
-3. 验证：`status`、托盘与 GUI、跑一次切换脚本（拨号 + 75s 稳定检查）。
+2. 迁移通道走既有 `gdut-switch` 计划任务（预授权、免 UAC；本机 UAC 策略会让自提权静默失败，见 CONTEXT 工程陷阱）。新 `switch-v4.ps1` 承担"迁移 + 切换"：停服务 / 杀托盘 → `gdut-net-setup.exe --silent --keep-password`（落 Program Files、重注册服务 / Run / 开始菜单 / 卸载项）→ 拷个人脚本与 `gdut-net-bak.exe` → 计划任务改指安装目录 → 等拨号成功 + 75s 稳定检查 → 失败自动回滚到桌面 exe。用户只需双击 `一键切换.bat`。
+3. 验证：`status`、托盘与 GUI、开始菜单十项、服务路径与 Run 键指向安装目录。
 4. 桌面目录保留观察；用户确认稳定后再删。
 
 ## 9. 错误处理与回滚
