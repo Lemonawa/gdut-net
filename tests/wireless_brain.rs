@@ -201,6 +201,21 @@ fn auth_failure_backs_off_5_15_30() {
 }
 
 #[test]
+fn online_without_ip_rejoins() {
+    // Online 但适配器层面 IP 丢了（关联还在、DHCP 租约掉/被清）：必须重走
+    // Joining（经 60s join 超时自愈），不能原地滞留只靠探测判踢。
+    let mut b = brain();
+    b.decide(&world(8, false, true, true, None)); // Associate
+    b.decide(&world(9, false, true, true, None)); // PortalAuth
+    b.on_auth(true, "ok", 9); // Online
+    assert_eq!(
+        b.decide(&world(20, false, true, false, None)),
+        Action::Associate
+    );
+    assert_eq!(b.phase(), WPhase::Joining);
+}
+
+#[test]
 fn assoc_lost_rejoins_and_mode_switch_releases() {
     let mut b = brain();
     b.decide(&world(8, false, true, true, None));

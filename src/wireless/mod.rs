@@ -180,7 +180,10 @@ impl Brain {
                     self.next_auth_at = None;
                     return Action::PortalAuth;
                 }
-                if !w.wlan_associated {
+                // 关联在但适配器层面无 IP（探测结论之外的自愈路径：探测
+                // verdict 可能抖动，IP 缺失是确定性事实）→ 重走 Joining，
+                // 由 60s join 超时兜底。
+                if !w.wlan_associated || !w.wlan_ip {
                     return self.start_join();
                 }
                 match self.last_probe_at {
