@@ -17,6 +17,7 @@
 | `tray.bat` | 起托盘（模式切换/Redial/Details 面板） |
 | `status.bat` | 打印一次服务状态（含 Mode/Wireless/Events） |
 | `proxy-check.bat` | 打印系统代理状态，期望 `ProxyEnable=0` |
+| `wireless-test.bat` | （管理员）无线认证现场体检：跑一次 `wireless test` 并回显输出（GUI 子系统 exe 直接跑无输出，bat 经 PowerShell 捕获） |
 | `tun-watch.ps1` / `tun-watch.log` | TUN 断网飞行记录仪（只读，15s 一拍记录代理/TUN/路由/DNS/网页状态） |
 | `说明.txt` | 给桌面用户的速查说明（中文，文件阅读无乱码问题） |
 
