@@ -61,10 +61,12 @@ mod win {
     }
 
     /// 安装态查询结果（setup 维护页 / 失败回滚用）。
+    /// `service_exe: None` = 服务存在但配置读取失败、路径未知——调用方
+    /// 不得据此删除服务，也不得把它当"未安装"处理。
     pub enum InstallState {
         NotInstalled,
         Installed {
-            service_exe: PathBuf,
+            service_exe: Option<PathBuf>,
             version: Option<String>,
         },
     }
@@ -213,6 +215,8 @@ mod win {
     }
 
     /// 服务是否已安装（不可查也视作未安装，setup 幂等容忍）。
+    /// `query_config` 读到的是整串 `lpBinaryPathName`（exe + 参数，可能带引号），
+    /// 这里剥出纯 exe 路径；读不出时 `service_exe: None`（存在但未知）。
     pub fn install_state() -> InstallState {
         let Ok(mgr) = ServiceManager::local_computer(None::<&str>, ServiceManagerAccess::CONNECT)
         else {
@@ -221,12 +225,21 @@ mod win {
         let access = ServiceAccess::QUERY_STATUS | ServiceAccess::QUERY_CONFIG;
         match mgr.open_service(SERVICE_NAME, access) {
             Ok(svc) => match svc.query_config() {
-                Ok(c) => InstallState::Installed {
-                    service_exe: c.executable_path,
-                    version: crate::shell::installed_version(),
-                },
+                Ok(c) => {
+                    let raw = c.executable_path.to_string_lossy();
+                    let exe = crate::cmdline::first_token(&raw);
+                    let service_exe = if exe.is_empty() {
+                        None
+                    } else {
+                        Some(PathBuf::from(exe))
+                    };
+                    InstallState::Installed {
+                        service_exe,
+                        version: crate::shell::installed_version(),
+                    }
+                }
                 Err(_) => InstallState::Installed {
-                    service_exe: PathBuf::new(),
+                    service_exe: None,
                     version: crate::shell::installed_version(),
                 },
             },

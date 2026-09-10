@@ -1,5 +1,6 @@
 //! 安装/修复/启动服务的工作流（后台线程 + 步骤事件 + 失败回滚）。
 
+use std::path::PathBuf;
 use std::sync::mpsc::Sender;
 use std::time::{Duration, Instant};
 
@@ -12,7 +13,25 @@ use crate::setup::{config_path, install_dir, SetupArgs};
 pub enum Ev {
     Step(String),
     StepDone(String),
-    Done(Result<(), String>),
+    /// 工作流结束：`result` 是安装结果，`rollback` 是回滚实情。
+    /// UI / silent 必须按 `rollback` 陈述，不得默认"已回滚"。
+    Done {
+        result: Result<(), String>,
+        rollback: RollbackOutcome,
+    },
+}
+
+/// 失败后的回滚实情（UI/silent 据此说真话）。
+#[derive(Clone)]
+pub enum RollbackOutcome {
+    /// 没有需要回滚的改动（安装成功，或失败发生在任何改动之前）。
+    NotNeeded,
+    /// 旧服务注册已恢复（或本次新建的服务已删除）；旧服务已尽力启动。
+    Restored,
+    /// 服务原本存在但路径读不出：未做任何改动（绝不删除）。
+    RestoredUnknown,
+    /// 回滚动作失败（含恢复注册后启动失败）。
+    Failed(String),
 }
 
 fn emit(tx: &Sender<Ev>, ev: Ev) {
@@ -63,15 +82,8 @@ fn run_install(tx: Sender<Ev>, args: SetupArgs, student_id: String, password: Op
     // args 供调用方标记模式；凭据由 password 的 Option 显式表达（None = KeepExisting）。
     let _ = args;
 
-    // 先记下旧服务路径（在解包覆盖之前）。路径为空 = 存在但读不到，回滚时按"没有"处理。
-    let prev_exe = match service::install_state() {
-        service::InstallState::Installed { service_exe, .. }
-            if !service_exe.as_os_str().is_empty() =>
-        {
-            Some(service_exe)
-        }
-        _ => None,
-    };
+    // 先记下安装前的服务状态（在解包覆盖之前）——回滚只能依据它。
+    let prev = capture_prev_service();
 
     let result: Result<()> = (|| {
         emit(&tx, Ev::Step("停止旧服务".into()));
@@ -129,22 +141,79 @@ fn run_install(tx: Sender<Ev>, args: SetupArgs, student_id: String, password: Op
     })();
 
     match result {
-        Ok(()) => emit(&tx, Ev::Done(Ok(()))),
+        Ok(()) => emit(
+            &tx,
+            Ev::Done {
+                result: Ok(()),
+                rollback: RollbackOutcome::NotNeeded,
+            },
+        ),
         Err(e) => {
             log::error!("Install failed (rolling back): {e:#}");
-            if let Err(rb) = rollback_for(prev_exe.as_deref()) {
-                log::error!("Rollback failed: {rb:#}");
-            }
-            emit(&tx, Ev::Done(Err(format!("{e:#}"))));
+            let rollback = rollback_for(&prev);
+            emit(
+                &tx,
+                Ev::Done {
+                    result: Err(format!("{e:#}")),
+                    rollback,
+                },
+            );
         }
     }
 }
 
-/// 失败回滚：把服务重新指回旧 exe（不重写配置）；原先没有服务则删除。
-fn rollback_for(prev_exe: Option<&std::path::Path>) -> Result<()> {
-    match prev_exe {
-        Some(p) => service::restore_service_path(&config_path(), p),
-        None => service::delete_service(),
+/// 安装开始前的服务状态：回滚的唯一依据。
+enum PrevService {
+    /// 没有服务：失败时删除本次可能新建的服务（不存在视为成功）。
+    None,
+    /// 有服务且路径已知：失败时恢复注册并尽力启动。
+    Known(PathBuf),
+    /// 有服务但路径读不出：失败时不碰注册，也绝不删除。
+    Unknown,
+}
+
+fn capture_prev_service() -> PrevService {
+    match service::install_state() {
+        service::InstallState::Installed {
+            service_exe: Some(exe),
+            ..
+        } => PrevService::Known(exe),
+        service::InstallState::Installed {
+            service_exe: None, ..
+        } => PrevService::Unknown,
+        service::InstallState::NotInstalled => PrevService::None,
+    }
+}
+
+/// 失败回滚：恢复旧服务注册（或删除新建服务），并回报回滚实情。
+/// 服务原本存在但路径未知时不做任何动作——宁可不回滚，也不误删。
+fn rollback_for(prev: &PrevService) -> RollbackOutcome {
+    match prev {
+        PrevService::Unknown => {
+            log::warn!("Service existed but its path could not be read; not touching it");
+            RollbackOutcome::RestoredUnknown
+        }
+        PrevService::None => match service::delete_service() {
+            Ok(()) => RollbackOutcome::Restored,
+            Err(e) => {
+                log::error!("Rollback delete_service failed: {e:#}");
+                RollbackOutcome::Failed(format!("{e:#}"))
+            }
+        },
+        PrevService::Known(exe) => match service::restore_service_path(&config_path(), exe) {
+            // 旧服务被本次安装停掉了：恢复注册后尽力把它拉起来。
+            Ok(()) => match service::start_service() {
+                Ok(()) => RollbackOutcome::Restored,
+                Err(e) => {
+                    log::error!("Rollback restored registration but service start failed: {e:#}");
+                    RollbackOutcome::Failed(format!("服务注册已恢复，但启动失败：{e:#}"))
+                }
+            },
+            Err(e) => {
+                log::error!("Rollback restore_service_path failed: {e:#}");
+                RollbackOutcome::Failed(format!("{e:#}"))
+            }
+        },
     }
 }
 
@@ -188,8 +257,20 @@ pub fn spawn_start_service(tx: Sender<Ev>) {
                 }
             })();
             match result {
-                Ok(()) => emit(&tx, Ev::Done(Ok(()))),
-                Err(e) => emit(&tx, Ev::Done(Err(format!("{e:#}")))),
+                Ok(()) => emit(
+                    &tx,
+                    Ev::Done {
+                        result: Ok(()),
+                        rollback: RollbackOutcome::NotNeeded,
+                    },
+                ),
+                Err(e) => emit(
+                    &tx,
+                    Ev::Done {
+                        result: Err(format!("{e:#}")),
+                        rollback: RollbackOutcome::NotNeeded,
+                    },
+                ),
             }
         })
         .expect("Failed to spawn start-service thread");

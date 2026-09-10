@@ -1,6 +1,7 @@
 pub mod adapter;
 pub mod backoff;
 pub mod cli;
+pub mod cmdline;
 pub mod config;
 pub mod crypto;
 pub mod eventlog;

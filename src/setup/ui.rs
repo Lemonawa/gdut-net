@@ -77,6 +77,8 @@ pub(crate) struct SetupApp {
     /// 步骤行（名称，完成）。
     pub(crate) steps: Vec<(String, bool)>,
     pub(crate) result: Option<Result<(), String>>,
+    /// 失败时的回滚实情（完成页据此陈述，不得默认"已回滚"）。
+    pub(crate) rollback: Option<work::RollbackOutcome>,
     pub(crate) status_line: Option<String>,
 }
 
@@ -106,6 +108,7 @@ impl SetupApp {
             rx: None,
             steps: Vec::new(),
             result: None,
+            rollback: None,
             status_line: None,
         }
     }
@@ -115,6 +118,7 @@ impl SetupApp {
         self.error = None;
         self.steps.clear();
         self.result = None;
+        self.rollback = None;
         self.status_line = None;
         let (tx, rx) = std::sync::mpsc::channel();
         self.rx = Some(rx);
@@ -153,7 +157,10 @@ impl SetupApp {
                             self.status_line = Some(label);
                         }
                     }
-                    Ok(work::Ev::Done(result)) => done = Some(result),
+                    Ok(work::Ev::Done { result, rollback }) => {
+                        self.rollback = Some(rollback);
+                        done = Some(result);
+                    }
                     // 通道空 = 本轮拉完；断开 = 线程结束（Done 之前断开说明线程死了）。
                     Err(std::sync::mpsc::TryRecvError::Empty) => break,
                     Err(std::sync::mpsc::TryRecvError::Disconnected) => {
@@ -344,7 +351,27 @@ impl SetupApp {
                             ui.colored_label(VERMILION, line);
                         }
                         ui.add_space(6.0);
-                        ui.label("已自动回滚到安装前的状态，可打开日志查看原因，或返回重试。");
+                        // 回滚实情：只陈述真的发生过的事，不替回滚打包票。
+                        match self.rollback.clone() {
+                            Some(work::RollbackOutcome::Restored) => {
+                                ui.label("已自动回滚到安装前的状态。");
+                            }
+                            Some(work::RollbackOutcome::RestoredUnknown) => {
+                                ui.colored_label(
+                                    VERMILION,
+                                    "服务原本已存在，但无法读取其路径，未做任何改动。请查看日志或手动修复。",
+                                );
+                            }
+                            Some(work::RollbackOutcome::Failed(rb)) => {
+                                ui.colored_label(
+                                    VERMILION,
+                                    format!("自动回滚失败：{rb}，请运行安装程序重试或查看日志。"),
+                                );
+                            }
+                            Some(work::RollbackOutcome::NotNeeded) | None => {
+                                ui.label("可打开日志查看原因，或返回重试。");
+                            }
+                        }
                     });
                 });
                 ui.add_space(12.0);
@@ -383,17 +410,14 @@ impl SetupApp {
             } => {
                 ui.label("GDUT Net 已安装在这台电脑上。");
                 ui.add_space(6.0);
-                ui.label(format!(
-                    "安装位置：{}",
-                    if service_exe.as_os_str().is_empty() {
-                        install_dir().display().to_string()
-                    } else {
-                        service_exe
-                            .parent()
-                            .map(|p| p.display().to_string())
-                            .unwrap_or_else(|| service_exe.display().to_string())
-                    }
-                ));
+                let location = match service_exe {
+                    Some(exe) => exe
+                        .parent()
+                        .map(|p| p.display().to_string())
+                        .unwrap_or_else(|| exe.display().to_string()),
+                    None => "（无法读取服务路径）".to_string(),
+                };
+                ui.label(format!("安装位置：{location}"));
                 ui.label(format!(
                     "版本：{}",
                     version.as_deref().unwrap_or(env!("CARGO_PKG_VERSION"))
