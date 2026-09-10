@@ -40,22 +40,31 @@ pub fn redact_query(url: &str) -> String {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PortalResult {
     Success,
+    /// 服务器判定该 IP 已在线（`result:0, ret_code:2`，msg 含"已经在线"）。
+    /// 语义上是成功：会话已存在，直接用它，别再重试。
+    AlreadyOnline,
     Failure(String),
     Malformed,
 }
 
-/// 解析 JSONP（`dr1004({...})`）或裸 JSON：`result` == "1"/1 → Success。
+/// 解析 JSONP（`dr1004({...})`）或裸 JSON：
+/// - `result == "1"/1` → Success；
+/// - `result == 0` 且 `ret_code == 2`（数字或字符串）→ AlreadyOnline
+///   （真机 2026-09-10：`{"result":0,"msg":"IP: x 已经在线","ret_code":2}`；
+///   错误密码是 ret_code:1，可靠区分，别按 msg 文案匹配）。
 pub fn parse_portal_reply(body: &str) -> PortalResult {
     let inner = extract_json(body);
     let Some(v) = serde_json::from_str::<serde_json::Value>(inner).ok() else {
         return PortalResult::Malformed;
     };
-    match v.get("result").map(|r| {
+    let result = v.get("result").map(|r| {
         r.as_str()
             .map(|s| s.to_string())
             .unwrap_or_else(|| r.to_string())
-    }) {
+    });
+    match result {
         Some(r) if r == "1" => PortalResult::Success,
+        Some(r) if r == "0" && ret_code(&v) == Some(2) => PortalResult::AlreadyOnline,
         Some(_) => PortalResult::Failure(
             v.get("msg")
                 .and_then(|m| m.as_str())
@@ -64,6 +73,12 @@ pub fn parse_portal_reply(body: &str) -> PortalResult {
         ),
         None => PortalResult::Malformed,
     }
+}
+
+/// ret_code 数值（数字或数字字符串均可）。
+fn ret_code(v: &serde_json::Value) -> Option<u64> {
+    let r = v.get("ret_code")?;
+    r.as_u64().or_else(|| r.as_str()?.parse().ok())
 }
 
 /// 取 callback(...) 括号内内容；无括号则原样（裸 JSON 兜底）。

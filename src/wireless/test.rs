@@ -86,6 +86,9 @@ pub fn cli_test(cfg_path: &Path) -> Result<()> {
             println!("Body: {body}");
             match portal::parse_portal_reply(&body) {
                 portal::PortalResult::Success => println!("RESULT: SUCCESS"),
+                portal::PortalResult::AlreadyOnline => {
+                    println!("RESULT: SUCCESS (already online)")
+                }
                 portal::PortalResult::Failure(m) => println!("RESULT: FAILURE ({m})"),
                 portal::PortalResult::Malformed => {
                     println!("RESULT: MALFORMED (check wlan_ac_ip / portal_url)")

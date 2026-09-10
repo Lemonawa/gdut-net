@@ -367,6 +367,7 @@ mod win {
                     let (ok, msg) = match r {
                         Ok(Some((code, body))) => match portal::parse_portal_reply(&body) {
                             PortalResult::Success => (true, "login ok".to_string()),
+                            PortalResult::AlreadyOnline => (true, "already online".to_string()),
                             PortalResult::Failure(m) => (false, m),
                             PortalResult::Malformed => {
                                 (false, format!("unparseable reply (HTTP {code})"))
@@ -589,10 +590,17 @@ mod win {
         // 通知钩子状态：重拨连续失败起点 + 节流器。
         let mut notifier = Notifier::new();
         let mut failing_since: Option<Instant> = None;
-        // run_once 建议的下一轮等待时长（首轮立即执行）。
-        let mut next_delay = Duration::ZERO;
+        // 下一次性 run_once 的绝对时刻（首轮立即执行）。用"绝对时刻 + 剩余
+        // 时长"而非"每次重置的 sleep"，否则无线 manager 每 2s 推快照会反复
+        // 唤醒 select、把退避 sleep 切碎——真机 2026-09-10：无网线时 7 分钟
+        // 重拨 79 次（756 刷屏）、有线时探针间隔从 30s 掉到 2s。
+        let mut wake_at = Instant::now();
 
         loop {
+            let remaining = wake_at.saturating_duration_since(Instant::now());
+            // run_once 只在计时到点或显式 Redial 命令时执行；事件唤醒（hb/wl/
+            // ev）只推快照，绝不落到 run_once（否则事件频率决定状态机频率）。
+            let mut run_state_machine = false;
             tokio::select! {
                 _ = stop.cancelled() => break,
                 // 外层 select 只轮询事件，绝不含 run_once——在飞的 run_once
@@ -602,10 +610,10 @@ mod win {
                     match maybe_cmd {
                         Some(Command::Redial) => {
                             log::info!("IPC command: manual redial");
-                            // 置一次性标志即返回（下一轮 run_once 顶部立即
-                            // 消费）；当前 sleep 已被本分支胜出打断，不会
-                            // 睡满退避时长。
+                            // 置一次性标志即返回；立即跑一轮（顶部消费标志），
+                            // 不等剩余退避时长。
                             watchdog.request_redial();
+                            run_state_machine = true;
                         }
                         Some(Command::SetMode { mode }) => {
                             log::info!("IPC command: set mode {}", mode_text(mode));
@@ -632,7 +640,9 @@ mod win {
                         None => break,
                     }
                 }
-                _ = sleep(next_delay) => {}
+                _ = sleep(remaining) => {
+                    run_state_machine = true;
+                }
                 // 钩子：心跳报 Error → Toast（节流）+ 立即推快照
                 // （长 sleep 间隔下 hb 状态变化须即时可见）。
                 hb_changed = hb_rx.changed() => {
@@ -660,6 +670,9 @@ mod win {
                         let _ = snap_tx.send(compose(watchdog.snapshot(), &events));
                     }
                 }
+            }
+            if !run_state_machine {
+                continue;
             }
 
             // 状态机单步：独占 await（拨号 spawn_blocking 期间不受命令
@@ -692,7 +705,7 @@ mod win {
             } else if snap.status == SessionStatus::Connected && failing_since.take().is_some() {
                 log::info!("Redial succeeded, session restored");
             }
-            next_delay = d;
+            wake_at = Instant::now() + d;
         }
 
         log::info!("Stop signal received, hanging up and exiting");

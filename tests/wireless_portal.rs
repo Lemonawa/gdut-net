@@ -67,3 +67,21 @@ fn redact_query_strips_credentials() {
     assert!(red.contains("***"));
     assert!(!red.contains("secret"));
 }
+
+#[test]
+fn already_online_is_success_not_failure() {
+    // 真机 2026-09-10 实包：重连时 AC 已记录该 IP 在线，回包 result:0 + ret_code:2。
+    let body = r#"dr1004({"result":0,"msg":"IP: 10.43.199.166 已经在线，","ret_code":2})"#;
+    assert_eq!(parse_portal_reply(body), PortalResult::AlreadyOnline);
+
+    // ret_code 以字符串形式回时也要认。
+    let body = r#"dr1004({"result":0,"msg":"already online","ret_code":"2"})"#;
+    assert_eq!(parse_portal_reply(body), PortalResult::AlreadyOnline);
+
+    // ret_code:1（密码错误）仍必须是失败，别把真错误吞成成功。
+    let body = r#"dr1004({"result":0,"msg":"密码错误","ret_code":1})"#;
+    assert_eq!(
+        parse_portal_reply(body),
+        PortalResult::Failure("密码错误".into())
+    );
+}
