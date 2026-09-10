@@ -171,10 +171,10 @@ fn register_aumid() {
     }
 }
 
-pub fn register_autostart() -> Result<()> {
+/// 注册托盘自启（HKCU Run）：值指向显式传入的托盘 exe（setup 场景 current_exe 是 setup 自己）。
+pub fn register_autostart(tray_exe: &std::path::Path) -> Result<()> {
     const RUN_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Run";
-    let exe = std::env::current_exe().context("Failed to get exe path")?;
-    let value = format!("\"{}\" tray", exe.display());
+    let value = format!("\"{}\" tray", tray_exe.display());
     let subkey_w: Vec<u16> = RUN_KEY.encode_utf16().chain(std::iter::once(0)).collect();
     let name_w: Vec<u16> = "gdut-net-tray"
         .encode_utf16()

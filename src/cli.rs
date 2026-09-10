@@ -31,7 +31,11 @@ pub enum Cmd {
     /// Run as Windows service (internal)
     Run,
     /// Install service, create dial entry, write config
-    Install,
+    Install {
+        /// Reuse the stored DPAPI password (no prompt, no plaintext)
+        #[arg(long)]
+        keep_password: bool,
+    },
     /// Uninstall and clean up
     Uninstall {
         /// Also remove config and logs under ProgramData
@@ -80,9 +84,11 @@ pub fn dispatch() -> Result<()> {
         #[cfg(not(windows))]
         Cmd::Run => bail!("run is only supported on Windows"),
         #[cfg(windows)]
-        Cmd::Install => crate::service::install(&cli.config, cli.password_stdin),
+        Cmd::Install { keep_password } => {
+            crate::service::install(&cli.config, cli.password_stdin, keep_password)
+        }
         #[cfg(not(windows))]
-        Cmd::Install => bail!("install is only supported on Windows"),
+        Cmd::Install { keep_password: _ } => bail!("install is only supported on Windows"),
         #[cfg(windows)]
         Cmd::Uninstall { purge } => crate::service::uninstall(&cli.config, purge),
         #[cfg(not(windows))]

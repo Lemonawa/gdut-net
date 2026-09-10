@@ -38,40 +38,127 @@ mod win {
 
     define_windows_service!(ffi_service_main, service_run);
 
-    /// install 入口（`gdut-net install`）。
-    pub fn install(cfg_path: &Path, password_stdin: bool) -> Result<()> {
-        require_admin()?;
+    /// 安装凭据来源：Plain 为明文（立即 DPAPI 加密）；KeepExisting 复用配置里的密文。
+    pub enum Credential {
+        Plain(String),
+        KeepExisting,
+    }
 
-        // 既有配置复用学号；重装时 password_blob 一律重新覆盖。
-        let mut cfg = if cfg_path.exists() {
-            Config::load(cfg_path)?
+    /// install 的显式输入：exe 路径由调用方给（setup 场景 current_exe 是 setup 自己）。
+    pub struct InstallRequest {
+        pub cfg_path: PathBuf,
+        pub student_id: Option<String>,
+        pub credential: Credential,
+        pub service_exe: PathBuf,
+        pub tray_exe: PathBuf,
+    }
+
+    pub struct InstallOutcome {
+        pub student_id: String,
+        pub cfg_path: PathBuf,
+    }
+
+    /// 安装态查询结果（setup 维护页 / 失败回滚用）。
+    pub enum InstallState {
+        NotInstalled,
+        Installed {
+            service_exe: PathBuf,
+            version: Option<String>,
+        },
+    }
+
+    /// install 入口（`gdut-net install [--keep-password]`）：提示与输出在壳内，核心不打印。
+    pub fn install(cfg_path: &Path, password_stdin: bool, keep_password: bool) -> Result<()> {
+        require_admin()?;
+        if keep_password && password_stdin {
+            bail!("--keep-password cannot be combined with --password-stdin");
+        }
+        let credential = if keep_password {
+            // 明文不落盘、不打印；复用密文也要先验证可解密（错配早报错）。
+            Credential::KeepExisting
+        } else if password_stdin {
+            Credential::Plain(read_stdin_password()?)
+        } else {
+            Credential::Plain(rpassword::prompt_password("Enter password: ")?)
+        };
+        // 旧逻辑：配置缺失或学号为空时才提示；管道安装携带既有配置，不提示。
+        let student_id = if Config::load(cfg_path)
+            .map(|c| c.account.student_id.trim().is_empty())
+            .unwrap_or(true)
+        {
+            Some(prompt_nonempty("Enter student ID: ")?)
+        } else {
+            None
+        };
+        let outcome = install_core(InstallRequest {
+            cfg_path: cfg_path.to_path_buf(),
+            student_id,
+            credential,
+            service_exe: std::env::current_exe()?,
+            tray_exe: std::env::current_exe()?,
+        })?;
+
+        // 旧输出逐字保留；拨号条目信息从落盘配置重读。
+        let cfg = Config::load(&outcome.cfg_path)?;
+        println!("Tray autostart: HKCU\\...\\Run\\gdut-net-tray");
+        println!("Install complete:");
+        println!("  Service: {SERVICE_NAME} (auto-start, restart on failure 5s/30s/60s)");
+        println!("  Config: {}", outcome.cfg_path.display());
+        println!(
+            "  Dial entry: {} ({})",
+            cfg.dial.entry_name, cfg.dial.pbk_path
+        );
+        println!("Start service: net start {SERVICE_NAME}");
+        println!("Note: after reinstall with new password, run net stop {SERVICE_NAME} && net start {SERVICE_NAME} to apply");
+        Ok(())
+    }
+
+    /// 安装核心：显式接收 exe 路径与凭据；不打印、不提示（CLI 外壳与 setup 共用）。
+    pub fn install_core(req: InstallRequest) -> Result<InstallOutcome> {
+        let mut cfg = if req.cfg_path.exists() {
+            Config::load(&req.cfg_path)?
         } else {
             Config::default()
         };
-        let password = if password_stdin {
-            read_stdin_password()?
-        } else {
-            rpassword::prompt_password("Enter password: ")?
+        let password = match &req.credential {
+            Credential::Plain(p) => {
+                if p.is_empty() {
+                    bail!("Password must not be empty");
+                }
+                p.clone()
+            }
+            Credential::KeepExisting => {
+                if cfg.account.password_blob.is_empty() {
+                    bail!("No stored password to keep (config has no password_blob)");
+                }
+                crate::crypto::unprotect(&cfg.account.password_blob)
+                    .context("Stored password cannot be decrypted (entropy/config mismatch)")?
+            }
         };
-        if password.is_empty() {
-            bail!("Password must not be empty");
+        if let Some(id) = req.student_id {
+            if !id.trim().is_empty() {
+                cfg.account.student_id = id;
+            }
         }
         if cfg.account.student_id.trim().is_empty() {
-            cfg.account.student_id = prompt_nonempty("Enter student ID: ")?;
+            bail!("Student ID must not be empty");
         }
         // 存量配置迁移：旧版 http_probe_url=9.9.9.9 被校园网墙，自动升级为 223.5.5.5
         if cfg.dial.http_probe_url == "http://9.9.9.9" {
             cfg.dial.http_probe_url = "http://223.5.5.5".into();
             log::info!("Auto-migrated http_probe_url: 9.9.9.9 -> 223.5.5.5");
         }
-        cfg.account.password_blob = crate::crypto::protect(&password)?;
-        cfg.save(cfg_path)?;
+        match &req.credential {
+            // Plain 才重写密文；KeepExisting 原样保留（重加密无意义且多一次 DPAPI 调用）。
+            Credential::Plain(_) => cfg.account.password_blob = crate::crypto::protect(&password)?,
+            Credential::KeepExisting => {}
+        }
+        cfg.save(&req.cfg_path)?;
 
         // pbk 目录先建好，RAS 条目与日志目录都依赖它。
         let pbk_path = PathBuf::from(&cfg.dial.pbk_path);
         if let Some(parent) = pbk_path.parent() {
-            std::fs::create_dir_all(parent)
-                .with_context(|| format!("Failed to create directory: {}", parent.display()))?;
+            std::fs::create_dir_all(parent)?;
         }
 
         crate::ras::ensure_entry(&cfg.dial.pbk_path, &cfg.dial.entry_name)?;
@@ -82,37 +169,62 @@ mod win {
             &password,
         )?;
 
-        create_service(cfg_path).context("Failed to create/update service")?;
+        create_service(&req.cfg_path, &req.service_exe)
+            .context("Failed to create/update service")?;
         if let Err(e) = set_recovery_actions() {
-            eprintln!("Warning: failed to set service recovery actions (ignored, service still usable): {e:#}");
             log::warn!("Failed to set service recovery actions (ignored): {e:#}");
         }
         if let Err(e) = eventlog::register_source() {
-            eprintln!("Warning: failed to register event source (ignored): {e:#}");
             log::warn!("Failed to register event source (ignored): {e:#}");
         }
-        // 托盘自启（HKCU Run，无需管理员，失败仅警告）
-        if let Err(e) = crate::tray::register_autostart() {
-            eprintln!("Warning: failed to register tray autostart (ignored): {e:#}");
-            log::warn!("Failed to register tray autostart (ignored): {e:#}");
-        } else {
-            println!("Tray autostart: HKCU\\...\\Run\\gdut-net-tray");
-        }
-
-        println!("Install complete:");
-        println!("  Service: {SERVICE_NAME} (auto-start, restart on failure 5s/30s/60s)");
-        println!("  Config: {}", cfg_path.display());
-        println!(
-            "  Dial entry: {} ({})",
-            cfg.dial.entry_name, cfg.dial.pbk_path
-        );
-        println!("Start service: net start {SERVICE_NAME}");
-        println!("Note: after reinstall with new password, run net stop {SERVICE_NAME} && net start {SERVICE_NAME} to apply");
-        Ok(())
+        crate::tray::register_autostart(&req.tray_exe)?;
+        Ok(InstallOutcome {
+            student_id: cfg.account.student_id.clone(),
+            cfg_path: req.cfg_path,
+        })
     }
 
-    /// uninstall 入口（`gdut-net uninstall [--purge]`）；每步幂等宽容。
+    /// 服务是否已安装（不可查也视作未安装，setup 幂等容忍）。
+    pub fn install_state() -> InstallState {
+        let Ok(mgr) = ServiceManager::local_computer(None::<&str>, ServiceManagerAccess::CONNECT)
+        else {
+            return InstallState::NotInstalled;
+        };
+        let access = ServiceAccess::QUERY_STATUS | ServiceAccess::QUERY_CONFIG;
+        match mgr.open_service(SERVICE_NAME, access) {
+            Ok(svc) => match svc.query_config() {
+                Ok(c) => InstallState::Installed {
+                    service_exe: c.executable_path,
+                    version: None,
+                },
+                Err(_) => InstallState::Installed {
+                    service_exe: PathBuf::new(),
+                    version: None,
+                },
+            },
+            Err(_) => InstallState::NotInstalled,
+        }
+    }
+
+    /// 配置 + 密文都在时返回学号（GUI 预填 / "使用现有密码"）。
+    pub fn existing_account(cfg_path: &Path) -> Option<String> {
+        let cfg = Config::load(cfg_path).ok()?;
+        let id = cfg.account.student_id.trim().to_string();
+        if id.is_empty() || cfg.account.password_blob.is_empty() {
+            None
+        } else {
+            Some(id)
+        }
+    }
+
+    /// uninstall 入口（`gdut-net uninstall [--purge]`）：管理员校验在壳内，核心静默（日志在 stderr）。
     pub fn uninstall(cfg_path: &Path, purge: bool) -> Result<()> {
+        require_admin()?;
+        uninstall_core(cfg_path, purge)
+    }
+
+    /// 卸载核心：每步幂等宽容；不打印（CLI 日志与 setup 共用）。
+    pub fn uninstall_core(cfg_path: &Path, purge: bool) -> Result<()> {
         let manager = ServiceManager::local_computer(None::<&str>, ServiceManagerAccess::CONNECT)
             .context("Failed to connect to service manager (administrator required)")?;
 
@@ -128,40 +240,81 @@ mod win {
                     wait_stopped(&service)?;
                 }
                 service.delete().context("Failed to delete service")?;
-                println!("Service removed");
+                log::info!("Service removed");
             }
             // 仅"Service not found"属幂等场景；拒绝访问等真实错误照常上抛。
             Err(windows_service::Error::Winapi(e))
                 if e.raw_os_error() == Some(ERROR_SERVICE_DOES_NOT_EXIST.0 as i32) =>
             {
-                println!("Service not found, skipping")
+                log::info!("Service not found, skipping")
             }
             Err(e) => return Err(anyhow!("Failed to open service: {e}")),
         }
 
         match eventlog::unregister_source() {
-            Ok(()) => println!("Event source removed"),
-            Err(e) => eprintln!("Failed to remove event source (ignored): {e}"),
+            Ok(()) => log::info!("Event source removed"),
+            Err(e) => log::warn!("Failed to remove event source (ignored): {e}"),
         }
         match crate::crypto::delete_entropy() {
-            Ok(()) => println!("Entropy removed"),
-            Err(e) => eprintln!("Failed to remove entropy (ignored): {e}"),
+            Ok(()) => log::info!("Entropy removed"),
+            Err(e) => log::warn!("Failed to remove entropy (ignored): {e}"),
         }
         match crate::tray::unregister_autostart() {
-            Ok(()) => println!("Tray autostart removed"),
-            Err(e) => eprintln!("Failed to remove tray autostart (ignored): {e}"),
+            Ok(()) => log::info!("Tray autostart removed"),
+            Err(e) => log::warn!("Failed to remove tray autostart (ignored): {e}"),
         }
 
         if purge {
             let dir = program_data_dir(cfg_path);
             ensure_purge_safe(&dir)?;
             match std::fs::remove_dir_all(&dir) {
-                Ok(()) => println!("Removed {}", dir.display()),
+                Ok(()) => log::info!("Removed {}", dir.display()),
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                    println!("{} not found, skipping", dir.display())
+                    log::info!("{} not found, skipping", dir.display())
                 }
                 Err(e) => return Err(anyhow!("Failed to remove {}: {e}", dir.display())),
             }
+        }
+        Ok(())
+    }
+
+    /// 停止服务；未安装时 no-op。超时未停稳报错（调用方决定是否回滚）。
+    pub fn stop_service(timeout: Duration) -> Result<()> {
+        let mgr = ServiceManager::local_computer(None::<&str>, ServiceManagerAccess::CONNECT)
+            .context("Failed to connect to service manager")?;
+        let svc = match mgr.open_service(
+            SERVICE_NAME,
+            ServiceAccess::QUERY_STATUS | ServiceAccess::STOP,
+        ) {
+            Ok(s) => s,
+            Err(_) => return Ok(()), // 未安装
+        };
+        if svc.query_status()?.current_state == ServiceState::Stopped {
+            return Ok(());
+        }
+        let _ = svc.stop();
+        let deadline = Instant::now() + timeout;
+        while Instant::now() < deadline {
+            if svc.query_status()?.current_state == ServiceState::Stopped {
+                return Ok(());
+            }
+            sleep(Duration::from_millis(250));
+        }
+        bail!("Service did not stop within {:?}", timeout)
+    }
+
+    /// 启动服务；未安装时报错（setup / GUI 的"启动服务"按钮用）。
+    pub fn start_service() -> Result<()> {
+        let mgr = ServiceManager::local_computer(None::<&str>, ServiceManagerAccess::CONNECT)
+            .context("Failed to connect to service manager")?;
+        let svc = mgr
+            .open_service(
+                SERVICE_NAME,
+                ServiceAccess::START | ServiceAccess::QUERY_STATUS,
+            )
+            .context("gdut-net service is not installed")?;
+        if svc.query_status()?.current_state != ServiceState::Running {
+            svc.start(&Vec::<OsString>::new())?;
         }
         Ok(())
     }
@@ -331,11 +484,7 @@ mod win {
         }
     }
 
-    fn service_binary() -> Result<PathBuf> {
-        std::env::current_exe().context("Failed to get current executable path")
-    }
-
-    fn create_service(cfg_path: &Path) -> Result<()> {
+    fn create_service(cfg_path: &Path, service_exe: &Path) -> Result<()> {
         let manager = ServiceManager::local_computer(
             None::<&str>,
             ServiceManagerAccess::CONNECT | ServiceManagerAccess::CREATE_SERVICE,
@@ -348,7 +497,7 @@ mod win {
             service_type: ServiceType::OWN_PROCESS,
             start_type: ServiceStartType::AutoStart,
             error_control: ServiceErrorControl::Normal,
-            executable_path: service_binary()?,
+            executable_path: service_exe.to_path_buf(),
             launch_arguments: vec![
                 OsString::from("--config"),
                 OsString::from(cfg_path.as_os_str()),
@@ -385,6 +534,20 @@ mod win {
             Err(e) => return Err(anyhow!("Failed to create service: {e}")),
         }
         Ok(())
+    }
+
+    /// 安装失败回滚：把服务重新指回旧 exe（不重写配置）。
+    pub fn restore_service_path(cfg_path: &Path, service_exe: &Path) -> Result<()> {
+        create_service(cfg_path, service_exe)
+    }
+
+    /// 回滚新建失败的服务：删除（不存在视为成功）。
+    pub fn delete_service() -> Result<()> {
+        let manager = ServiceManager::local_computer(None::<&str>, ServiceManagerAccess::CONNECT)?;
+        match manager.open_service(SERVICE_NAME, ServiceAccess::DELETE) {
+            Ok(svc) => svc.delete().context("Failed to delete service"),
+            Err(_) => Ok(()),
+        }
     }
 
     /// 3 段失败恢复：Restart 5s/30s/60s，失败计数 24h 后清零。
@@ -444,7 +607,11 @@ mod win {
 }
 
 #[cfg(windows)]
-pub use win::{install, service_main, uninstall};
+pub use win::{
+    delete_service, existing_account, install, install_core, install_state, restore_service_path,
+    service_main, start_service, stop_service, uninstall, uninstall_core, Credential,
+    InstallOutcome, InstallRequest, InstallState,
+};
 
 #[cfg(windows)]
 pub const SERVICE_NAME: &str = "gdut-net";
