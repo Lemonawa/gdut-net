@@ -1899,7 +1899,7 @@ pub fn spawn_uninstall(tx: std::sync::mpsc::Sender<Ev>, purge: bool, remove_dir:
 pub fn run(args: &SetupArgs, mode: Mode) -> anyhow::Result<()>;  // silent, English output
 ```
 
-- [ ] **Step 1: `work::spawn_uninstall`:** worker: step "停止服务"（`stop_service(16s)` + kill_tray）→ "移除服务与集成"（`service::uninstall_core(&cfg, purge)`）→ "移除安装目录"（`shell::schedule_install_dir_removal(&install_dir())`，仅 remove_dir=true）→ `Done`。Uninstall 失败不回滚（幂等可重试），日志记录。
+- [ ] **Step 1: `work::spawn_uninstall`:** worker: step "停止服务"（`stop_service(16s)` + kill_tray）→ "移除服务与集成"（`service::uninstall_core(&cfg, purge)`）→ "移除安装目录"（`shell::schedule_install_dir_removal(&install_dir())`，仅 remove_dir=true）→ `Done`。Uninstall 失败不回滚（幂等可重试），日志记录。R7 形状：`Ev::Done { result, rollback: RollbackOutcome::NotNeeded }`（卸载无回滚概念）；UI/silent 的 Done 匹配沿用 Task 8 的 `{ result, rollback }` 形状。
 
 - [ ] **Step 2: `silent.rs`:**
 
@@ -1923,8 +1923,18 @@ pub fn run(args: &SetupArgs, mode: Mode) -> Result<()> {
                 match ev {
                     work::Ev::Step(s) => println!("== {s}"),
                     work::Ev::StepDone(s) => println!("ok {s}"),
-                    work::Ev::Done(Err(e)) => { eprintln!("FAILED: {e}"); std::process::exit(1); }
-                    work::Ev::Done(Ok(())) => { ok = true; break; }
+                    // R7：Ev::Done 携带回滚实情，silent 必须照实打印（英文）。
+                    work::Ev::Done { result: Err(e), rollback } => {
+                        eprintln!("FAILED: {e}");
+                        match rollback {
+                            work::RollbackOutcome::NotNeeded => {}
+                            work::RollbackOutcome::Restored => eprintln!("Rolled back to the previous service."),
+                            work::RollbackOutcome::RestoredUnknown => eprintln!("Service existed but its path was unreadable; left untouched."),
+                            work::RollbackOutcome::Failed(r) => eprintln!("ROLLBACK FAILED: {r}"),
+                        }
+                        std::process::exit(1);
+                    }
+                    work::Ev::Done { result: Ok(()), .. } => { ok = true; break; }
                 }
             }
             if ok { println!("Install complete: {}", install_dir().display()); }
