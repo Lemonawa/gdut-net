@@ -57,18 +57,26 @@ pub fn remove_shell_integration() -> Result<()> {
 }
 
 /// 延迟删除安装目录：启动后直接退出的 setup 进程无法删掉自己所在的目录，
-/// 交给 cmd 等待数秒后 rmdir（CREATE_NO_WINDOW | DETACHED_PROCESS）。
+/// 交给 cmd 后台重试（CREATE_NO_WINDOW | DETACHED_PROCESS）：单条 cmd 最多
+/// 90 次，每次 `rmdir` 后若目录已消失即退出，否则约 1s 后再试。
+/// GUI 路径的 setup 窗口会长时间占用安装目录里的 exe，重试窗口覆盖它；
+/// silent 路径进程立刻退出，最初几次尝试即可删掉。
+///
+/// `current_dir(temp)`：开始菜单快捷方式把工作目录设为安装目录，助手若带
+/// 这个 CWD 就无法删除自己所在的目录（Windows 目录占用），先挪到 temp。
+/// 用 `raw_arg` 原样把脚本交给 cmd：`.arg()` 会按 CRT 规则把内嵌引号转义成
+/// `\"`，而 cmd.exe 不认这种转义——安装路径含空格，引号必须原样到达。
 pub fn schedule_install_dir_removal(dir: &Path) -> Result<()> {
     use std::os::windows::process::CommandExt as _;
     let dir = dir.to_path_buf();
+    let script = format!(
+        "@echo off & for /l %i in (1,1,90) do (rmdir /s /q \"{0}\" 2>nul & if not exist \"{0}\" exit /b & ping -n 2 127.0.0.1 >nul)",
+        dir.display()
+    );
     std::process::Command::new("cmd")
-        .args([
-            "/c",
-            &format!(
-                r#"ping -n 4 127.0.0.1 >nul & rmdir /s /q "{}""#,
-                dir.display()
-            ),
-        ])
+        .arg("/c")
+        .raw_arg(&script)
+        .current_dir(std::env::temp_dir())
         .creation_flags(0x0800_0000 | 0x0000_0008) // CREATE_NO_WINDOW | DETACHED_PROCESS
         .spawn()
         .context("Failed to spawn delayed directory removal")?;

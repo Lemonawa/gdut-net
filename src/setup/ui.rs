@@ -71,6 +71,13 @@ pub(crate) enum StepStatus {
     Failed(String),
 }
 
+/// 小票单行：`key` 用于事件匹配（稳定英文标识），`label` 用于显示（中文）。
+pub(crate) struct StepRow {
+    key: &'static str,
+    label: String,
+    status: StepStatus,
+}
+
 pub(crate) struct SetupApp {
     pub(crate) args: SetupArgs,
     pub(crate) state: InstallState,
@@ -84,8 +91,8 @@ pub(crate) struct SetupApp {
     /// 已有可用密文时填入学号（`service::existing_account`）。
     pub(crate) has_existing: Option<String>,
     pub(crate) rx: Option<Receiver<work::Ev>>,
-    /// 步骤行（名称，状态）。
-    pub(crate) steps: Vec<(String, StepStatus)>,
+    /// 步骤行（key 匹配，label 显示）。
+    pub(crate) steps: Vec<StepRow>,
     pub(crate) result: Option<Result<(), String>>,
     /// 失败时的回滚实情（完成页据此陈述，不得默认"已回滚"）。
     pub(crate) rollback: Option<work::RollbackOutcome>,
@@ -175,64 +182,67 @@ impl SetupApp {
     /// 拉取工作线程事件；Progress 与 StartService 共用。
     /// 返回 Done 事件的结果（由调用方决定跳转哪个页面）。
     fn drain_events(&mut self) -> Option<Result<(), String>> {
+        // 取出接收端，处理期间可自由改 self；处理完原样放回（rx 未被消耗）。
+        let rx = self.rx.take()?;
         let mut done = None;
-        if let Some(rx) = &self.rx {
-            loop {
-                match rx.try_recv() {
-                    Ok(work::Ev::Step(label)) => self.steps.push((label, StepStatus::Running)),
-                    Ok(work::Ev::StepDone(label)) => {
-                        // 标记同名步骤完成；带括号补充文本的按前缀匹配。
-                        if let Some(i) = self.find_running(&label) {
-                            self.steps[i].0 = label.clone();
-                            self.steps[i].1 = StepStatus::Done;
-                        }
-                        // 拨号结果补充行（"等待拨号结果（Connected）"）留给完成页展示。
-                        if label.starts_with("等待拨号结果") {
-                            self.status_line = Some(label);
-                        }
+        loop {
+            match rx.try_recv() {
+                Ok(work::Ev::Step { key, label }) => self.steps.push(StepRow {
+                    key,
+                    label,
+                    status: StepStatus::Running,
+                }),
+                Ok(work::Ev::StepDone { key, label }) => {
+                    // 拨号结果补充行（"等待拨号结果（Connected）"）留给完成页展示。
+                    if key == work::STEP_WAIT_DIAL {
+                        self.status_line = Some(label.clone());
                     }
-                    Ok(work::Ev::StepFinished { label, outcome }) => {
-                        // 卸载报告行：uninstall_core 返回后由 worker 逐行翻译（核心不打印）。
-                        let status = match outcome {
-                            work::StepOutcome::Done => StepStatus::Done,
-                            work::StepOutcome::Skipped => StepStatus::Skipped,
-                            work::StepOutcome::Failed(e) => StepStatus::Failed(e),
-                        };
-                        if let Some(i) = self.find_running(&label) {
-                            self.steps[i].0 = label;
-                            self.steps[i].1 = status;
+                    self.finish_step(key, label, StepStatus::Done);
+                }
+                Ok(work::Ev::StepFinished {
+                    key,
+                    label,
+                    outcome,
+                }) => {
+                    // 卸载报告行：uninstall_core 返回后由 worker 逐行翻译（核心不打印）。
+                    let status = match outcome {
+                        work::StepOutcome::Done => StepStatus::Done,
+                        work::StepOutcome::Skipped => StepStatus::Skipped,
+                        work::StepOutcome::Failed(e) => StepStatus::Failed(e),
+                    };
+                    self.finish_step(key, label, status);
+                }
+                Ok(work::Ev::Done { result, rollback }) => {
+                    self.rollback = Some(rollback);
+                    done = Some(result);
+                }
+                // 通道空 = 本轮拉完；断开 = 线程结束（Done 之前断开说明线程死了）。
+                Err(std::sync::mpsc::TryRecvError::Empty) => break,
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    if done.is_none() {
+                        let what = if self.uninstalling {
+                            "卸载"
                         } else {
-                            self.steps.push((label, status));
-                        }
+                            "安装"
+                        };
+                        done = Some(Err(format!("{what}线程意外退出，请查看日志。")));
                     }
-                    Ok(work::Ev::Done { result, rollback }) => {
-                        self.rollback = Some(rollback);
-                        done = Some(result);
-                    }
-                    // 通道空 = 本轮拉完；断开 = 线程结束（Done 之前断开说明线程死了）。
-                    Err(std::sync::mpsc::TryRecvError::Empty) => break,
-                    Err(std::sync::mpsc::TryRecvError::Disconnected) => {
-                        if done.is_none() {
-                            let what = if self.uninstalling {
-                                "卸载"
-                            } else {
-                                "安装"
-                            };
-                            done = Some(Err(format!("{what}线程意外退出，请查看日志。")));
-                        }
-                        break;
-                    }
+                    break;
                 }
             }
         }
+        self.rx = Some(rx);
         done
     }
 
-    /// 最近一个"事件标签前缀匹配"的运行中步骤下标（StepDone/StepFinished 共用）。
-    fn find_running(&self, label: &str) -> Option<usize> {
-        self.steps.iter().rposition(|(l, status)| {
-            matches!(status, StepStatus::Running) && label.starts_with(l.as_str())
-        })
+    /// 按 key 定位步骤行并落结局；找不到则追加（防御未知 key）。
+    fn finish_step(&mut self, key: &'static str, label: String, status: StepStatus) {
+        if let Some(row) = self.steps.iter_mut().rev().find(|r| r.key == key) {
+            row.label = label;
+            row.status = status;
+        } else {
+            self.steps.push(StepRow { key, label, status });
+        }
     }
 }
 
@@ -776,14 +786,14 @@ impl SetupApp {
                 };
                 ui.label(egui::RichText::new(title).color(INK_BLACK).strong());
                 ui.add_space(4.0);
-                for (label, status) in &self.steps {
-                    let (line, color) = match status {
-                        StepStatus::Running => (format!("… {label}"), INK_BLACK),
-                        StepStatus::Done => (format!("✓ {label}"), READER_GREEN),
+                for row in &self.steps {
+                    let (line, color) = match &row.status {
+                        StepStatus::Running => (format!("… {}", row.label), INK_BLACK),
+                        StepStatus::Done => (format!("✓ {}", row.label), READER_GREEN),
                         StepStatus::Skipped => {
-                            (format!("跳过 {label}"), INK_BLACK.gamma_multiply(0.6))
+                            (format!("跳过 {}", row.label), INK_BLACK.gamma_multiply(0.6))
                         }
-                        StepStatus::Failed(e) => (format!("失败 {label}：{e}"), VERMILION),
+                        StepStatus::Failed(e) => (format!("失败 {}：{e}", row.label), VERMILION),
                     };
                     ui.colored_label(color, line);
                 }

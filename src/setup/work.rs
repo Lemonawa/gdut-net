@@ -10,11 +10,19 @@ use crate::service::{self, Credential, InstallRequest};
 use crate::setup::{config_path, install_dir, SetupArgs};
 
 /// 工作线程 → UI 的事件（步骤开始 / 步骤完成 / 整体结果）。
+/// 步骤事件都带 `key`（稳定英文标识：UI 匹配、silent 输出）与 `label`（中文 UI 文案）。
 pub enum Ev {
-    Step(String),
-    StepDone(String),
+    Step {
+        key: &'static str,
+        label: String,
+    },
+    StepDone {
+        key: &'static str,
+        label: String,
+    },
     /// 带结局的一步（卸载报告翻译用）：UI 按 Done/Skipped/Failed 选 ✓/跳过/失败 文案。
     StepFinished {
+        key: &'static str,
         label: String,
         outcome: StepOutcome,
     },
@@ -24,6 +32,43 @@ pub enum Ev {
         result: Result<(), String>,
         rollback: RollbackOutcome,
     },
+}
+
+// ---- 步骤键：UI 按 key 匹配步骤行；silent 经 `step_label_en(key)` 输出英文 ----
+
+pub const STEP_STOP_SERVICE: &str = "stop_service";
+pub const STEP_UNPACK: &str = "unpack";
+pub const STEP_INSTALL_CORE: &str = "install_core";
+pub const STEP_SHELL_INTEGRATION: &str = "shell_integration";
+pub const STEP_START_SERVICE: &str = "start_service";
+pub const STEP_WAIT_DIAL: &str = "wait_dial";
+pub const STEP_UNINSTALL_STOP_SERVICE: &str = "uninstall_stop_service";
+pub const STEP_UNINSTALL_SERVICE: &str = "uninstall_service";
+pub const STEP_UNINSTALL_EVENT_SOURCE: &str = "uninstall_event_source";
+pub const STEP_UNINSTALL_ENTROPY: &str = "uninstall_entropy";
+pub const STEP_UNINSTALL_AUTOSTART: &str = "uninstall_autostart";
+pub const STEP_UNINSTALL_PURGE: &str = "uninstall_purge";
+pub const STEP_UNINSTALL_REMOVE_DIR: &str = "uninstall_remove_dir";
+
+/// 步骤键 → 英文一行（silent 控制台输出；GBK 控制台防乱码）。
+/// 未知键原样返回（不假装认识）；中文只留在 label 里，供 GUI 使用。
+pub fn step_label_en(key: &str) -> &str {
+    match key {
+        STEP_STOP_SERVICE => "Stop old service",
+        STEP_UNPACK => "Unpack files",
+        STEP_INSTALL_CORE => "Write config and register service",
+        STEP_SHELL_INTEGRATION => "Create Start Menu shortcuts",
+        STEP_START_SERVICE => "Start service",
+        STEP_WAIT_DIAL => "Wait for dial result",
+        STEP_UNINSTALL_STOP_SERVICE => "Stop service",
+        STEP_UNINSTALL_SERVICE => "Remove service",
+        STEP_UNINSTALL_EVENT_SOURCE => "Remove event source",
+        STEP_UNINSTALL_ENTROPY => "Remove encryption key",
+        STEP_UNINSTALL_AUTOSTART => "Remove tray autostart",
+        STEP_UNINSTALL_PURGE => "Delete config and logs",
+        STEP_UNINSTALL_REMOVE_DIR => "Remove install directory",
+        other => other,
+    }
 }
 
 /// `service::Step` 的 UI 侧镜像（Ev 不直接持有 service 内部类型）。
@@ -48,6 +93,40 @@ pub enum RollbackOutcome {
 
 fn emit(tx: &Sender<Ev>, ev: Ev) {
     let _ = tx.send(ev);
+}
+
+/// 发一条步骤开始事件（key 为稳定英文标识，label 为中文 UI 文案）。
+fn step(tx: &Sender<Ev>, key: &'static str, label: &str) {
+    emit(
+        tx,
+        Ev::Step {
+            key,
+            label: label.to_string(),
+        },
+    );
+}
+
+/// 发一条步骤完成事件。
+fn step_done(tx: &Sender<Ev>, key: &'static str, label: &str) {
+    emit(
+        tx,
+        Ev::StepDone {
+            key,
+            label: label.to_string(),
+        },
+    );
+}
+
+/// 发一条带结局的步骤事件（卸载报告翻译）。
+fn step_finished(tx: &Sender<Ev>, key: &'static str, label: &str, outcome: StepOutcome) {
+    emit(
+        tx,
+        Ev::StepFinished {
+            key,
+            label: label.to_string(),
+            outcome,
+        },
+    );
 }
 
 /// 从 exe 尾读 payload；未打包时回退到 exe 旁 payload/ 目录（开发态）。
@@ -98,12 +177,12 @@ fn run_install(tx: Sender<Ev>, args: SetupArgs, student_id: String, password: Op
     let prev = capture_prev_service();
 
     let result: Result<()> = (|| {
-        emit(&tx, Ev::Step("停止旧服务".into()));
+        step(&tx, STEP_STOP_SERVICE, "停止旧服务");
         service::stop_service(Duration::from_secs(16))?;
         kill_tray();
-        emit(&tx, Ev::StepDone("停止旧服务".into()));
+        step_done(&tx, STEP_STOP_SERVICE, "停止旧服务");
 
-        emit(&tx, Ev::Step("解包文件".into()));
+        step(&tx, STEP_UNPACK, "解包文件");
         let dir = install_dir();
         std::fs::create_dir_all(&dir)
             .with_context(|| format!("Failed to create {}", dir.display()))?;
@@ -126,9 +205,9 @@ fn run_install(tx: Sender<Ev>, args: SetupArgs, student_id: String, password: Op
             std::fs::copy(&self_exe, &setup_dest)
                 .context("Failed to copy setup exe into install dir")?;
         }
-        emit(&tx, Ev::StepDone("解包文件".into()));
+        step_done(&tx, STEP_UNPACK, "解包文件");
 
-        emit(&tx, Ev::Step("写入配置并注册服务".into()));
+        step(&tx, STEP_INSTALL_CORE, "写入配置并注册服务");
         let credential = match password {
             Some(p) => Credential::Plain(p),
             None => Credential::KeepExisting,
@@ -140,15 +219,15 @@ fn run_install(tx: Sender<Ev>, args: SetupArgs, student_id: String, password: Op
             service_exe: dir.join("gdut-net.exe"),
             tray_exe: dir.join("gdut-net.exe"),
         })?;
-        emit(&tx, Ev::StepDone("写入配置并注册服务".into()));
+        step_done(&tx, STEP_INSTALL_CORE, "写入配置并注册服务");
 
-        emit(&tx, Ev::Step("创建开始菜单快捷方式".into()));
+        step(&tx, STEP_SHELL_INTEGRATION, "创建开始菜单快捷方式");
         crate::shell::install_shell_integration(&dir, env!("CARGO_PKG_VERSION"))?;
-        emit(&tx, Ev::StepDone("创建开始菜单快捷方式".into()));
+        step_done(&tx, STEP_SHELL_INTEGRATION, "创建开始菜单快捷方式");
 
-        emit(&tx, Ev::Step("启动服务".into()));
+        step(&tx, STEP_START_SERVICE, "启动服务");
         service::start_service()?;
-        emit(&tx, Ev::StepDone("启动服务".into()));
+        step_done(&tx, STEP_START_SERVICE, "启动服务");
         Ok(())
     })();
 
@@ -240,55 +319,50 @@ pub fn spawn_uninstall(tx: Sender<Ev>, purge: bool, remove_dir: bool) {
 
 fn run_uninstall(tx: Sender<Ev>, purge: bool, remove_dir: bool) {
     let result: Result<()> = (|| {
-        emit(&tx, Ev::Step("停止服务".into()));
+        step(&tx, STEP_UNINSTALL_STOP_SERVICE, "停止服务");
         service::stop_service(Duration::from_secs(16))?;
         kill_tray();
-        emit(&tx, Ev::StepDone("停止服务".into()));
+        step_done(&tx, STEP_UNINSTALL_STOP_SERVICE, "停止服务");
 
         // uninstall_core 返回分步报告；此处按报告逐行翻译成 UI 行（核心不打印）。
         let report = service::uninstall_core(&config_path(), purge)?;
-        emit(
+        step_finished(
             &tx,
-            Ev::StepFinished {
-                label: "移除服务".into(),
-                outcome: outcome_of(report.service),
-            },
+            STEP_UNINSTALL_SERVICE,
+            "移除服务",
+            outcome_of(report.service),
         );
-        emit(
+        step_finished(
             &tx,
-            Ev::StepFinished {
-                label: "移除事件源".into(),
-                outcome: outcome_of(report.event_source),
-            },
+            STEP_UNINSTALL_EVENT_SOURCE,
+            "移除事件源",
+            outcome_of(report.event_source),
         );
-        emit(
+        step_finished(
             &tx,
-            Ev::StepFinished {
-                label: "移除加密密钥".into(),
-                outcome: outcome_of(report.entropy),
-            },
+            STEP_UNINSTALL_ENTROPY,
+            "移除加密密钥",
+            outcome_of(report.entropy),
         );
-        emit(
+        step_finished(
             &tx,
-            Ev::StepFinished {
-                label: "移除托盘自启".into(),
-                outcome: outcome_of(report.autostart),
-            },
+            STEP_UNINSTALL_AUTOSTART,
+            "移除托盘自启",
+            outcome_of(report.autostart),
         );
         if let Some(purge_step) = report.purge {
-            emit(
+            step_finished(
                 &tx,
-                Ev::StepFinished {
-                    label: "删除配置与日志".into(),
-                    outcome: outcome_of(purge_step.step),
-                },
+                STEP_UNINSTALL_PURGE,
+                "删除配置与日志",
+                outcome_of(purge_step.step),
             );
         }
 
         if remove_dir {
-            emit(&tx, Ev::Step("移除安装目录".into()));
+            step(&tx, STEP_UNINSTALL_REMOVE_DIR, "移除安装目录");
             crate::shell::schedule_install_dir_removal(&install_dir())?;
-            emit(&tx, Ev::StepDone("移除安装目录".into()));
+            step_done(&tx, STEP_UNINSTALL_REMOVE_DIR, "移除安装目录");
         }
         Ok(())
     })();
@@ -339,19 +413,20 @@ pub fn spawn_start_service(tx: Sender<Ev>) {
     std::thread::Builder::new()
         .name("gdut-net-setup-start".into())
         .spawn(move || {
-            emit(&tx, Ev::Step("启动 gdut-net 服务".into()));
+            step(&tx, STEP_START_SERVICE, "启动 gdut-net 服务");
             let result: Result<()> = (|| {
                 service::start_service()?;
-                emit(&tx, Ev::StepDone("启动 gdut-net 服务".into()));
-                emit(&tx, Ev::Step("等待拨号结果".into()));
+                step_done(&tx, STEP_START_SERVICE, "启动 gdut-net 服务");
+                step(&tx, STEP_WAIT_DIAL, "等待拨号结果");
                 let deadline = Instant::now() + Duration::from_secs(25);
                 loop {
                     if let Ok(s) = query_status_once() {
                         use crate::ipc::protocol::SessionStatus::*;
                         if matches!(s.status, Connected | Backoff | AuthFail) {
-                            emit(
+                            step_done(
                                 &tx,
-                                Ev::StepDone(format!("等待拨号结果（{}）", s.status_text())),
+                                STEP_WAIT_DIAL,
+                                &format!("等待拨号结果（{}）", s.status_text()),
                             );
                             return Ok(());
                         }
