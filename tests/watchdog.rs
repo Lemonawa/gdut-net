@@ -71,6 +71,44 @@ async fn dials_then_reports_connected() {
 }
 
 #[tokio::test]
+async fn link_down_pauses_dial_and_link_up_redials() {
+    let mut wd = Watchdog::new(
+        MockDialer::default(),
+        MockProber(vec![ProbeVerdict::Alive]),
+        cfg(),
+    );
+    // 拔线：完全不碰拨号端口（真机 651/756 端口卡死的根因）
+    wd.set_eth_link(Some(false));
+    let wait = wd.run_once().await;
+    assert_eq!(wd.dial_calls(), 0);
+    assert_eq!(wd.snapshot().status, SessionStatus::Backoff);
+    assert_eq!(wait, gdut_net::watchdog::LINK_DOWN_RETRY);
+    assert_eq!(
+        wd.snapshot().last_drop_reason.as_deref(),
+        Some("Ethernet link down")
+    );
+
+    // 插线：runtime 侧把 false→true 转成 request_redial，下一拍立即拨
+    wd.set_eth_link(Some(true));
+    wd.request_redial();
+    wd.run_once().await;
+    assert_eq!(wd.dial_calls(), 1);
+    assert_eq!(wd.snapshot().status, SessionStatus::Connected);
+}
+
+#[tokio::test]
+async fn unknown_link_state_still_dials() {
+    let mut wd = Watchdog::new(
+        MockDialer::default(),
+        MockProber(vec![ProbeVerdict::Alive]),
+        cfg(),
+    );
+    // 未喂链路态（None）：保持旧行为，照常拨号
+    wd.run_once().await;
+    assert_eq!(wd.dial_calls(), 1);
+}
+
+#[tokio::test]
 async fn transient_fail_enters_backoff() {
     let d = MockDialer {
         fail_times: 2,

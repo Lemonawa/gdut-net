@@ -73,7 +73,13 @@ mod win {
         user: String,
         pass: String,
         session: Option<SendSession>,
+        /// 连续 756/813（端口卡在 dialing 态）计数；达阈值重启 RasMan 清端口。
+        wedge_fails: u32,
     }
+
+    /// 连续 756/813 达该值 → 重启 RasMan（真机 2026-09-10：无载波拨号后
+    /// 端口卡死，所有拨号返回 756，重试无法清除，重启系统才恢复）。
+    const WEDGE_RESTART_AFTER: u32 = 3;
 
     impl RealDialer {
         fn new(cfg: &Config, pass: String) -> Self {
@@ -83,6 +89,7 @@ mod win {
                 user: cfg.account.student_id.clone(),
                 pass,
                 session: None,
+                wedge_fails: 0,
             }
         }
     }
@@ -119,10 +126,32 @@ mod win {
             });
             match res {
                 Ok(s) => {
+                    self.wedge_fails = 0;
                     self.session = Some(s);
                     Ok(())
                 }
-                Err(e) => Err(e),
+                Err(e) => {
+                    if matches!(e.code, 756 | 813) {
+                        self.wedge_fails += 1;
+                        if self.wedge_fails >= WEDGE_RESTART_AFTER {
+                            log::warn!(
+                                "Dial port stuck (error {} x{}), restarting RasMan",
+                                e.code,
+                                self.wedge_fails
+                            );
+                            let r = tokio::task::spawn_blocking(ras::restart_rasman).await;
+                            match r {
+                                Ok(Ok(())) => log::info!("RasMan restarted, port state cleared"),
+                                Ok(Err(e)) => log::warn!("RasMan restart failed: {e:#}"),
+                                Err(e) => log::warn!("RasMan restart task join failed: {e}"),
+                            }
+                            self.wedge_fails = 0;
+                        }
+                    } else {
+                        self.wedge_fails = 0;
+                    }
+                    Err(e)
+                }
             }
         }
 
@@ -299,10 +328,11 @@ mod win {
                 )
             })
             .await
-            .unwrap_or((false, false, None));
+            .unwrap_or((None, false, None));
             let world = World {
                 now: now(),
-                eth_link_up: eth_up,
+                // 无以太网卡（None）也按"链路不可用"处理：接管无线是唯一出路。
+                eth_link_up: eth_up.unwrap_or(false),
                 wired_connected: *wired_rx.borrow_and_update(),
                 wlan_associated: assoc,
                 wlan_ip: wlan.is_some(),
@@ -595,6 +625,17 @@ mod win {
         // 唤醒 select、把退避 sleep 切碎——真机 2026-09-10：无网线时 7 分钟
         // 重拨 79 次（756 刷屏）、有线时探针间隔从 30s 掉到 2s。
         let mut wake_at = Instant::now();
+        // 以太网链路轮询（拔线门控 + 插线立即重拨）。2s 一拍，与无线 manager 同频。
+        let mut link_tick = tokio::time::interval(Duration::from_secs(2));
+        link_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        // 启动即采样：无网线时宁可等，绝不在无载波时拨号（端口会卡 756）。
+        let initial_link = tokio::task::spawn_blocking(adapter::ethernet_link_up)
+            .await
+            .unwrap_or(None);
+        if initial_link == Some(false) {
+            log::info!("Ethernet link down at startup, dial paused");
+        }
+        watchdog.set_eth_link(initial_link);
 
         loop {
             let remaining = wake_at.saturating_duration_since(Instant::now());
@@ -642,6 +683,23 @@ mod win {
                 }
                 _ = sleep(remaining) => {
                     run_state_machine = true;
+                }
+                // 链路轮询：喂 watchdog 门控；链路 false→true 立即重拨（插线即拨）。
+                _ = link_tick.tick() => {
+                    let up = tokio::task::spawn_blocking(adapter::ethernet_link_up)
+                        .await
+                        .unwrap_or(None);
+                    if watchdog.eth_link() != up {
+                        log::info!("Ethernet link state: {up:?}");
+                        if watchdog.eth_link() == Some(false) && up == Some(true) {
+                            log::info!("Ethernet link restored, redialing immediately");
+                            events.push(unix_now(), "Ethernet link restored, redialing");
+                            watchdog.request_redial();
+                            run_state_machine = true;
+                        }
+                        watchdog.set_eth_link(up);
+                        let _ = snap_tx.send(compose(watchdog.snapshot(), &events));
+                    }
                 }
                 // 钩子：心跳报 Error → Toast（节流）+ 立即推快照
                 // （长 sleep 间隔下 hb 状态变化须即时可见）。

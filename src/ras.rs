@@ -175,6 +175,51 @@ mod win {
         }
     }
 
+    /// 重启 RasMan 服务以清除卡死的 PPPoE 端口状态（756/813 连续不退）。
+    ///
+    /// 真机事故（2026-09-10）：无载波时反复拨号把端口留在 dialing 态，
+    /// 之后所有 RasDialW 都返回 756，重启系统才恢复。本函数是最后手段；
+    /// 调用方保证仅在连续 756/813 且无会话可挂断时触发。
+    pub fn restart_rasman() -> Result<()> {
+        use std::ffi::OsString;
+
+        use windows_service::service::{ServiceAccess, ServiceState};
+        use windows_service::service_manager::{ServiceManager, ServiceManagerAccess};
+
+        let manager = ServiceManager::local_computer(None::<&str>, ServiceManagerAccess::CONNECT)
+            .map_err(|e| anyhow!("ServiceManager connect failed: {e}"))?;
+        let svc = manager
+            .open_service(
+                "RasMan",
+                ServiceAccess::STOP | ServiceAccess::START | ServiceAccess::QUERY_STATUS,
+            )
+            .map_err(|e| anyhow!("OpenService RasMan failed: {e}"))?;
+
+        if let Ok(st) = svc.query_status() {
+            if st.current_state != ServiceState::Stopped {
+                let _ = svc.stop();
+                for _ in 0..20 {
+                    sleep(Duration::from_millis(500));
+                    if matches!(svc.query_status(), Ok(s) if s.current_state == ServiceState::Stopped)
+                    {
+                        break;
+                    }
+                }
+            }
+        }
+
+        let args: Vec<OsString> = Vec::new();
+        svc.start(&args)
+            .map_err(|e| anyhow!("StartService RasMan failed: {e}"))?;
+        for _ in 0..20 {
+            sleep(Duration::from_millis(500));
+            if matches!(svc.query_status(), Ok(s) if s.current_state == ServiceState::Running) {
+                return Ok(());
+            }
+        }
+        anyhow::bail!("RasMan did not reach Running in 10s")
+    }
+
     /// 挂断所有已枚举的 PPPoE 会话（756/813 抢占场景），返回挂断数。
     fn hangup_all_ppp(pbk: &str, name: &str) -> usize {
         let mut count = 0;
@@ -347,4 +392,7 @@ mod win {
 }
 
 #[cfg(windows)]
-pub use win::{dial, ensure_entry, error_string, set_credentials, ConnState, RasError, RasSession};
+pub use win::{
+    dial, ensure_entry, error_string, restart_rasman, set_credentials, ConnState, RasError,
+    RasSession,
+};

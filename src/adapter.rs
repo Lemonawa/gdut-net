@@ -57,6 +57,7 @@ mod win {
         pub ipv4: Option<Ipv4Addr>,
         pub gateway: Option<Ipv4Addr>,
         pub ifindex: u32,
+        pub oper_up: bool,
     }
 
     /// 未启用 is_virtual 过滤前的选择条件（按 IfType/OperStatus 等）。
@@ -144,6 +145,7 @@ mod win {
                     ipv4: unicast_ipv4(a),
                     gateway: gateway_ipv4(a),
                     ifindex: unsafe { a.Anonymous1.Anonymous.IfIndex },
+                    oper_up: a.OperStatus == IfOperStatusUp,
                 });
             }
             node = a.Next;
@@ -217,18 +219,28 @@ mod win {
         candidates.into_iter().next()
     }
 
-    /// 以太网链路态：任一非虚拟以太网卡 Up（拔线 → false，秒级信号）。
+    /// 以太网链路态：`None` = 没有任何非虚拟以太网卡（无法判断，调用方不应据此禁拨）；
+    /// `Some(false)` = 有网卡但全部 link down（拔线）；`Some(true)` = 至少一张 Up。
     /// 与 physical_adapter() 区别：不要求已有 IPv4（DHCP 前的 link up 也算）。
-    pub(super) fn ethernet_link_up() -> bool {
-        let selector = |a: &IP_ADAPTER_ADDRESSES_LH| {
-            a.IfType == IF_TYPE_ETHERNET_CSMACD && a.OperStatus == IfOperStatusUp
-        };
-        adapters(&selector)
-            .map(|list| {
-                list.iter()
-                    .any(|a| !super::is_virtual(&a.name) && !super::is_virtual(&a.desc))
-            })
-            .unwrap_or(false)
+    pub(super) fn ethernet_link_up() -> Option<bool> {
+        let selector = |a: &IP_ADAPTER_ADDRESSES_LH| a.IfType == IF_TYPE_ETHERNET_CSMACD;
+        let list = adapters(&selector).ok()?;
+        let mut found = false;
+        let mut up = false;
+        for a in list {
+            if super::is_virtual(&a.name) || super::is_virtual(&a.desc) {
+                continue;
+            }
+            found = true;
+            if a.oper_up {
+                up = true;
+            }
+        }
+        if found {
+            Some(up)
+        } else {
+            None
+        }
     }
 }
 
@@ -256,9 +268,9 @@ pub fn wlan_adapter() -> Option<AdapterInfo> {
     win::wlan_adapter()
 }
 
-/// 以太网链路态：任一非虚拟以太网卡 Up（拔线检测的秒级信号）。
+/// 以太网链路态：`None` = 无非虚拟以太网卡；`Some(bool)` = 存在且是否全部 link up。
 #[cfg(windows)]
-pub fn ethernet_link_up() -> bool {
+pub fn ethernet_link_up() -> Option<bool> {
     win::ethernet_link_up()
 }
 

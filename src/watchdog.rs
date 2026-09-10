@@ -20,6 +20,10 @@ use crate::ras::ErrKind;
 /// 会话稳定累计时长阈值：达到后重置退避与重拨计数。
 const STABLE_RESET_AFTER: Duration = Duration::from_secs(300);
 
+/// 以太网链路 down（拔线）时的轮询间隔：不拨号，等链路回来。
+/// 插线事件由 runtime 侧转发为 `request_redial`，实现"插回即拨"。
+pub const LINK_DOWN_RETRY: Duration = Duration::from_secs(5);
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Phase {
     Idle,
@@ -82,6 +86,8 @@ pub struct Watchdog {
     last_drop_reason: Option<String>,
     /// IPC Redial 命令置位；run_once 顶部消费后立即 do_dial。
     redial_requested: AtomicBool,
+    /// 以太网链路态：None=未知/无网卡（照常拨号）；Some(false)=拔线，暂停拨号。
+    eth_link: Option<bool>,
 }
 
 impl Watchdog {
@@ -104,7 +110,18 @@ impl Watchdog {
             dial_calls: 0,
             last_drop_reason: None,
             redial_requested: AtomicBool::new(false),
+            eth_link: None,
         }
+    }
+
+    /// runtime 每拍喂入以太网链路态；`false→true` 由 runtime 转成 `request_redial`。
+    pub fn set_eth_link(&mut self, up: Option<bool>) {
+        self.eth_link = up;
+    }
+
+    /// 测试辅助/诊断：当前链路门控状态。
+    pub fn eth_link(&self) -> Option<bool> {
+        self.eth_link
     }
 
     pub fn snapshot(&self) -> StateSnapshot {
@@ -206,6 +223,18 @@ impl Watchdog {
     }
 
     async fn do_dial(&mut self) -> Duration {
+        // 拔线门控（真机 2026-09-10）：无载波时拨号会把 PPPoE 端口留在
+        // dialing 状态，后续全都 756（已经拨了这个连接），重试无法清除，
+        // 直到重启 RasMan/系统。链路 down 期间不碰端口，每 5s 轮询；
+        // 链路恢复由 runtime 转 request_redial 立即触发本函数。
+        if self.eth_link == Some(false) {
+            if self.last_drop_reason.as_deref() != Some("Ethernet link down") {
+                log::info!("Ethernet link down, dial paused (waiting for cable)");
+            }
+            self.phase = Phase::Backoff;
+            self.last_drop_reason = Some("Ethernet link down".to_string());
+            return LINK_DOWN_RETRY;
+        }
         self.phase = Phase::Dialing;
         self.dial_calls += 1;
         match self.dialer.dial().await {
