@@ -4,6 +4,8 @@ pub mod cli;
 pub mod config;
 pub mod crypto;
 pub mod eventlog;
+#[cfg(windows)]
+pub mod fonts;
 pub mod heartbeat;
 pub mod ipc;
 pub mod logging;
@@ -17,6 +19,9 @@ pub mod ras;
 pub mod runtime;
 #[cfg(windows)]
 pub mod service;
+#[cfg(windows)]
+pub mod setup;
+pub mod setup_args;
 #[cfg(windows)]
 pub mod tray;
 pub mod watchdog;
