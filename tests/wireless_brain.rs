@@ -6,14 +6,66 @@ fn brain() -> Brain {
     Brain::new(NetMode::WiredExclusive, 8, 10, 30)
 }
 fn world(now: u64, wired: bool, assoc: bool, ip: bool, probe: Option<ProbeVerdict>) -> World {
+    world_split(now, wired, wired, assoc, ip, probe)
+}
+/// eth_link_up 与 wired_connected 独立可控的构造（final review 后两者
+/// 语义分离：链路态是快信号，watchdog 是兜底信号）。
+#[allow(clippy::too_many_arguments)]
+fn world_split(
+    now: u64,
+    eth_link_up: bool,
+    wired_connected: bool,
+    assoc: bool,
+    ip: bool,
+    probe: Option<ProbeVerdict>,
+) -> World {
     World {
         now,
-        eth_link_up: wired,
-        wired_connected: wired,
+        eth_link_up,
+        wired_connected,
         wlan_associated: assoc,
         wlan_ip: ip,
         probe,
     }
+}
+
+#[test]
+fn link_down_takeover_beats_watchdog_staleness() {
+    // 拔线瞬间：eth link 立即 down，但 watchdog 探测周期未到，仍报
+    // Connected（僵死快照）。链路态是秒级快信号，必须单独触发接管
+    // （spec §5 / ADR-0005 决策 5），不能等 watchdog 过期。
+    let mut b = brain();
+    assert_eq!(
+        b.decide(&world_split(0, false, true, false, false, None)),
+        Action::None
+    );
+    assert_eq!(
+        b.decide(&world_split(7, false, true, false, false, None)),
+        Action::None
+    );
+    assert_eq!(
+        b.decide(&world_split(8, false, true, false, false, None)),
+        Action::Associate
+    );
+}
+
+#[test]
+fn link_up_session_dead_debounced_takeover() {
+    // 网线插着（link up）但有线会话死了（watchdog 非 Connected）：
+    // 走原有去抖接管路径，行为不变（spec §5 的兜底信号分支）。
+    let mut b = brain();
+    assert_eq!(
+        b.decide(&world_split(0, true, false, false, false, None)),
+        Action::None
+    );
+    assert_eq!(
+        b.decide(&world_split(7, true, false, false, false, None)),
+        Action::None
+    );
+    assert_eq!(
+        b.decide(&world_split(8, true, false, false, false, None)),
+        Action::Associate
+    );
 }
 
 #[test]

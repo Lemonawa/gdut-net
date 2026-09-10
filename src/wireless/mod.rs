@@ -121,7 +121,9 @@ impl Brain {
         match self.mode {
             NetMode::WiredPlusStandby => self.keep_wireless(w),
             NetMode::WiredExclusive => {
-                if w.wired_connected {
+                // spec §5：链路态是秒级快信号，watchdog 是兜底（会话死但
+                // 链路活）。两者任一缺失即不健康；同时就绪才算健康。
+                if w.eth_link_up && w.wired_connected {
                     self.unhealthy_since = None;
                     let since = *self.healthy_since.get_or_insert(w.now);
                     if w.now - since >= self.release_after && self.phase != WPhase::Off {
