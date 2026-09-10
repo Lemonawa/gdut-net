@@ -416,6 +416,17 @@ pub fn install_core(req: InstallRequest) -> Result<InstallOutcome> {
 
 `create_service(cfg_path: &Path, service_exe: &Path)`: replace the `service_binary()?` call with `service_exe`; delete `service_binary()` if unused after Task 10.
 
+Also extend the re-export at the bottom of `src/service.rs` so the new core API is reachable from setup/cli (ruling R1):
+
+```rust
+#[cfg(windows)]
+pub use win::{
+    delete_service, existing_account, install, install_core, install_state, restore_service_path,
+    service_main, start_service, stop_service, uninstall, uninstall_core, Credential,
+    InstallOutcome, InstallRequest, InstallState,
+};
+```
+
 CLI shell keeps exact prints:
 
 ```rust
@@ -1257,7 +1268,7 @@ fn quote_args(args: &[String]) -> String {
 ```rust
 //! 安装器 GUI（中文）：向导 + 维护页。页面内容在后续任务补全。
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use eframe::egui::{self, ViewportBuilder};
 
 use crate::service::InstallState;
@@ -1354,7 +1365,7 @@ pub mod setup;
 
 - [ ] **Step 10: Cross-compile gates** — same three commands as Task 3.
 
-- [ ] **Step 11: Real-machine smoke.** Stage `gdut-net-setup.exe` (xwin build) to Windows and double-click it: UAC prompt appears, window opens, Chinese renders (no tofu), 开始安装 → 账号页 stub → 返回 works. Screenshot if useful. Close window.
+- [ ] **Step 11: Real-machine smoke.** Stage `gdut-net-setup.exe` (xwin build) to Windows and double-click it: UAC prompt appears, window opens, Chinese renders (no tofu). Note: this machine already has a service, so the app opens on the Maintenance page; verify it renders and the window closes cleanly. The Welcome→Account path is exercised once the service is removed (Task 9 checks) or on a clean machine. Screenshot if useful.
 
 - [ ] **Step 12: Commit**
 
@@ -1859,7 +1870,7 @@ Welcome → Account.
 
 - [ ] **Step 4: Cross-compile gates** — three commands.
 
-- [ ] **Step 5: Real-machine dev check.** Stage to Windows: `gdut-net-setup.exe` + a `payload/` dir holding `gdut-net.exe` (cross-built), the 7 bats, 说明.txt. Run setup from an **elevated** cmd (`--silent` is Task 9; for now wizard): complete the wizard on the real machine. This performs a REAL install onto this machine: service path moves from the Desktop kit to Program Files immediately. That is acceptable (the Desktop kit stays as fallback, `rollback-v4.ps1` can restore), but only do it once the user has been told. Verify: window flow, shortcuts appear in Start Menu, service PathName updated, dial still succeeds. If anything fails, `rollback.bat` from the desktop kit is the escape hatch.
+- [ ] **Step 5: Real-machine UI smoke (no install).** With the user told, stage `gdut-net-setup.exe` + a `payload/` dir (cross-built `gdut-net.exe`, the 7 bats, `说明.txt`) and run it: UAC prompt appears, window opens on the Maintenance page (service already present), Chinese renders (no tofu), "修复安装" reaches the account page with 学号 prefilled and 使用现有密码 checked, inputs work; close without installing. **Do not complete the install here** (ruling R3): the first real install happens in Task 9's silent check, and the full machine migration is Task 12.
 
 - [ ] **Step 6: Commit**
 
@@ -1931,12 +1942,13 @@ Note: with empty `student_id` in silent install, `install_core` must keep the ex
 
 - [ ] **Step 3: UninstallConfirm page UI:** purge checkbox "同时删除配置与日志（含学号密码、拨号记录）", warning text, red "卸载" button → `work::spawn_uninstall(tx, purge, true)` + Progress page; "取消" → back to Maintenance / close.
 
-- [ ] **Step 4: Cross-compile gates + real-machine silent checks** (on the dev box, after Task 8's install):
+- [ ] **Step 4: Cross-compile gates + real-machine silent checks** (this is the first real install onto the dev box; service moves from the Desktop kit to Program Files — the Desktop kit stays as fallback):
 ```
-gdut-net-setup.exe --silent --keep-password     (elevated) → "Install complete", exit 0
-gdut-net-setup.exe --silent --uninstall --purge (elevated) → exit 0, service gone, shortcuts gone
+gdut-net-setup.exe --silent --keep-password      (elevated) → "Install complete", exit 0
+gdut-net-setup.exe --silent --uninstall          (elevated) → exit 0, service gone, shortcuts gone
+gdut-net-setup.exe --silent --keep-password      (elevated) → reinstall so the machine stays in the new layout
 ```
-Then re-install via wizard so the machine stays in the new layout. **Do not** run `--purge` if you still need the DPAPI password: `--purge` deletes config + logs, and the password blob is gone; the next install needs the plaintext password again. On this machine the safe sequence for silent uninstall testing is without `--purge`.
+**Never** run `--purge` on this machine: it deletes config + logs and the DPAPI password blob would be gone, requiring the plaintext password again. Silent uninstall testing is always without `--purge`.
 
 - [ ] **Step 5: Commit**
 
@@ -2382,10 +2394,6 @@ const CFG_PATH: &str = r"C:\ProgramData\gdut-net\config.toml";
 const LOG_DIR: &str = r"C:\ProgramData\gdut-net\logs";
 
 fn run_window(...) -> anyhow::Result<()> {
-    let student_id = crate::config::Config::load(std::path::Path::new(CFG_PATH))
-        .ok()
-        .map(|c| c.account.student_id)
-        .filter(|s| !s.trim().is_empty());
     // ... NativeOptions 同 Task 10 ...
     Box::new(move |cc| {
         cc.egui_ctx.set_visuals(egui::Visuals::light());
@@ -2393,8 +2401,26 @@ fn run_window(...) -> anyhow::Result<()> {
             log::error!("Failed to load CJK fonts: {e:#}");
         }
         if let Ok(mut g) = shared.lock() { *g = Some(cc.egui_ctx.clone()); }
-        Ok(Box::new(Gui { snapshot, redial_tx, setmode_tx, student_id }))
+        Ok(Box::new(Gui {
+            snapshot,
+            redial_tx,
+            setmode_tx,
+            student_id: load_student_id(),
+            cfg_mtime: config_mtime(),
+        }))
     })
+}
+
+/// 学号：空值显示 "—"。
+fn load_student_id() -> Option<String> {
+    crate::config::Config::load(std::path::Path::new(CFG_PATH))
+        .ok()
+        .map(|c| c.account.student_id)
+        .filter(|s| !s.trim().is_empty())
+}
+
+fn config_mtime() -> Option<std::time::SystemTime> {
+    std::fs::metadata(CFG_PATH).and_then(|m| m.modified()).ok()
 }
 
 struct Gui {
@@ -2402,6 +2428,7 @@ struct Gui {
     redial_tx: Sender<()>,
     setmode_tx: Sender<NetMode>,
     student_id: Option<String>,
+    cfg_mtime: Option<std::time::SystemTime>,
 }
 
 impl eframe::App for Gui {
@@ -2412,6 +2439,12 @@ impl eframe::App for Gui {
             ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
         }
         ctx.request_repaint_after(Duration::from_millis(500));
+        // 修改账号密码后配置变了：mtime 变化才重读（ruling R4）。
+        let mtime = config_mtime();
+        if mtime != self.cfg_mtime {
+            self.student_id = load_student_id();
+            self.cfg_mtime = mtime;
+        }
         CentralPanel::default().show(ui, |ui| {
             ui.horizontal(|ui| {
                 ui.heading("GDUT Net");
