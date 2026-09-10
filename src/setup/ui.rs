@@ -29,6 +29,8 @@ const READER_GREEN: egui::Color32 = egui::Color32::from_rgb(0x2E, 0x9E, 0x5B);
 const VERMILION: egui::Color32 = egui::Color32::from_rgb(0xC0, 0x39, 0x2B);
 
 pub fn run(args: SetupArgs) -> Result<()> {
+    // GUI 安装器无 stderr（windows 子系统）：写 ProgramData 文件日志。
+    crate::logging::init_tray_logging(r"C:\ProgramData\gdut-net\logs", "setup");
     let state = crate::service::install_state();
     let options = eframe::NativeOptions {
         viewport: ViewportBuilder::default()

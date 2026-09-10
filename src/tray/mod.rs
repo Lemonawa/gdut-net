@@ -1,8 +1,8 @@
-//! 托盘常驻图标（tray-icon）+ 按需 egui 状态面板。
+//! 托盘常驻图标（tray-icon）+ 常驻 egui 状态窗口（按需显示/隐藏）。
 //!
 //! 事件循环模型：**主线程裸 win32 消息泵**（GetMessageW /
-//! MsgWaitForMultipleObjects），tray-icon 在 Windows 要求创建图标的
-//! 线程跑 win32 事件循环，主线程恰好满足且无需引入 winit 依赖。
+//! MsgWaitForMultipleObjects + 命名唤醒事件），tray-icon 在 Windows 要求
+//! 创建图标的线程跑 win32 事件循环，主线程恰好满足且无需引入 winit 依赖。
 //!
 //! 线程模型：所有 MenuItem 操作（含 set_text）都在主泵线程完成——
 //! muda 的 MenuItem 内含 Rc，不可跨线程。后台 IPC 线程只经 std mpsc
@@ -11,7 +11,7 @@
 //! PipeClient 的 async 方法由每次调用自建的极小 current_thread runtime
 //! 驱动——托盘线程没有全局 tokio executor，不能假设 runtime 存在。
 
-mod panel;
+mod gui;
 
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
@@ -20,21 +20,127 @@ use std::time::Duration;
 use anyhow::{anyhow, Context, Result};
 use tray_icon::menu::{CheckMenuItem, Menu, MenuEvent, MenuItem, PredefinedMenuItem};
 use windows::core::PCWSTR;
-use windows::Win32::Foundation::ERROR_SUCCESS;
+use windows::Win32::Foundation::{ERROR_SUCCESS, HANDLE};
 use windows::Win32::System::Registry::{
     RegCloseKey, RegCreateKeyExW, RegSetValueExW, HKEY, HKEY_CURRENT_USER, KEY_WRITE,
     REG_OPTION_NON_VOLATILE, REG_SZ,
 };
-use windows::Win32::System::Threading::INFINITE;
+use windows::Win32::System::Threading::{CreateEventW, INFINITE};
 
 use crate::ipc::client::PipeClient;
 use crate::ipc::protocol::{Command, NetMode, SessionStatus, StateSnapshot, WPhase};
+
+use gui::GuiShared;
 
 /// 后台线程 connect 失败后的重试间隔。
 const CONNECT_RETRY: Duration = Duration::from_secs(3);
 
 /// 共享快照缓存：None = 尚未收到（服务未运行/刚断开）。
 pub(crate) type SharedSnapshot = Arc<Mutex<Option<StateSnapshot>>>;
+
+/// 托盘单实例 mutex 名（内核对象；同一用户会话可见即可，无需 Global\ 前缀）。
+const SINGLETON_NAME: &str = "gdut-net-tray-singleton";
+/// 二次启动 → 主实例显示 GUI 的自动复位事件名。
+const SHOW_EVENT_NAME: &str = "gdut-net-tray-show";
+
+/// UTF-16 + NUL，Win32 W 接口参数。
+fn wide(s: &str) -> Vec<u16> {
+    s.encode_utf16().chain(std::iter::once(0)).collect()
+}
+
+/// 单实例判定结果。
+enum Singleton {
+    /// 首个实例：持有内核 mutex，进程退出自动释放。
+    Primary(HANDLE),
+    /// 已有托盘在跑：唤醒它的 GUI 后本进程退出。
+    Secondary,
+}
+
+/// 单实例守卫；mutex 创建失败时降级为 Primary（无保护，不阻断托盘启动）。
+fn acquire_singleton() -> Singleton {
+    use windows::Win32::Foundation::{CloseHandle, GetLastError, ERROR_ALREADY_EXISTS};
+    use windows::Win32::System::Threading::CreateMutexW;
+
+    let name = wide(SINGLETON_NAME);
+    match unsafe { CreateMutexW(None, false, PCWSTR(name.as_ptr())) } {
+        Ok(h) => {
+            // CreateMutexW 成功但已存在同名对象：说明另一托盘持有它。
+            if unsafe { GetLastError() } == ERROR_ALREADY_EXISTS {
+                let _ = unsafe { CloseHandle(h) };
+                Singleton::Secondary
+            } else {
+                Singleton::Primary(h)
+            }
+        }
+        Err(e) => {
+            log::warn!("Tray singleton mutex failed (continuing unguarded): {e}");
+            Singleton::Primary(HANDLE::default())
+        }
+    }
+}
+
+/// 二次启动：置位命名事件，跨进程唤醒主实例显示 GUI。
+///
+/// 主实例未运行时事件不存在，本函数只创建后立即关闭（无副作用）。
+fn signal_show() {
+    use windows::Win32::Foundation::CloseHandle;
+    use windows::Win32::System::Threading::{CreateEventW, SetEvent};
+
+    let name = wide(SHOW_EVENT_NAME);
+    if let Ok(h) = unsafe { CreateEventW(None, false, false, PCWSTR(name.as_ptr())) } {
+        let _ = unsafe { SetEvent(h) };
+        let _ = unsafe { CloseHandle(h) };
+    }
+}
+
+/// 从 cmd/PowerShell 启动时有控制台窗口；双击（windows 子系统）没有。
+pub fn has_console() -> bool {
+    let hwnd = unsafe { windows::Win32::System::Console::GetConsoleWindow() };
+    !hwnd.0.is_null()
+}
+
+/// 双击 exe（无参数、无控制台）入口：已安装 → 托盘 + 弹 GUI；未安装 → 中文提示。
+pub fn double_click_entry() -> Result<()> {
+    match crate::service::install_state() {
+        crate::service::InstallState::Installed { .. } => run_tray(true),
+        crate::service::InstallState::NotInstalled => {
+            message_box_install_hint();
+            Ok(())
+        }
+    }
+}
+
+/// 未安装时的中文提示（GUI 场景用户可见，不受"控制台英文"约束）。
+fn message_box_install_hint() {
+    use windows::Win32::UI::WindowsAndMessaging::{MessageBoxW, MB_ICONINFORMATION, MB_OK};
+
+    let text =
+        wide("gdut-net 尚未安装。\n\n请运行安装包 gdut-net-setup.exe，或从开始菜单打开安装程序。");
+    let title = wide("GDUT Net");
+    unsafe {
+        MessageBoxW(
+            None,
+            PCWSTR(text.as_ptr()),
+            PCWSTR(title.as_ptr()),
+            MB_OK | MB_ICONINFORMATION,
+        );
+    }
+}
+
+/// 从泵线程显示/聚焦常驻 GUI：窗口线程活 → 唤醒；否则新建。
+fn show_gui(
+    gui: &GuiShared,
+    snapshot: &SharedSnapshot,
+    redial_tx: &mpsc::Sender<()>,
+    setmode_tx: &mpsc::Sender<NetMode>,
+) {
+    gui::show_or_focus(
+        Arc::clone(gui),
+        Arc::clone(snapshot),
+        redial_tx.clone(),
+        setmode_tx.clone(),
+    );
+}
 
 /// 32x32 RGBA 方块图标（代码生成，无需二进制图片资源）：2px 透明留白，
 /// 托盘里不顶边。
@@ -242,7 +348,18 @@ pub fn unregister_autostart() -> Result<()> {
 }
 
 /// 托盘主体：主线程建菜单/图标 → 起 IPC 线程 → 跑 win32 消息泵。
-pub fn run_tray() -> Result<()> {
+///
+/// `show_gui_at_start=true`（双击入口）：托盘就绪后立刻弹出 GUI。
+/// 已有实例在跑时改为置位命名事件唤出它的窗口，本进程直接退出。
+pub fn run_tray(show_gui_at_start: bool) -> Result<()> {
+    let _singleton = match acquire_singleton() {
+        Singleton::Primary(h) => h,
+        Singleton::Secondary => {
+            signal_show();
+            return Ok(());
+        }
+    };
+    crate::logging::init_tray_logging(r"C:\ProgramData\gdut-net\logs", "tray");
     register_aumid();
 
     let snapshot: SharedSnapshot = Arc::new(Mutex::new(None));
@@ -292,7 +409,8 @@ pub fn run_tray() -> Result<()> {
                 .context("Failed to pick initial tray icon")?,
         )
         .with_menu(Box::new(menu))
-        .with_menu_on_left_click(true)
+        // 左键留给日常 GUI；右键仍弹原生菜单。
+        .with_menu_on_left_click(false)
         .build()
         .map_err(|e| anyhow!("Failed to create tray icon: {e}"))?;
     let mut last_kind = IconKind::Down;
@@ -311,16 +429,44 @@ pub fn run_tray() -> Result<()> {
             .context("Failed to start tray IPC thread")?;
     }
 
+    // 命名自动复位事件：二次启动的进程 SetEvent → 本进程 MsgWait 醒来弹 GUI。
+    let wake_event = {
+        let name = wide(SHOW_EVENT_NAME);
+        unsafe { CreateEventW(None, false, false, PCWSTR(name.as_ptr())) }
+            .context("Failed to create tray show event")?
+    };
+    let gui: GuiShared = Arc::new(Mutex::new(None));
+    if show_gui_at_start {
+        show_gui(&gui, &snapshot, &panel_redial_tx, &panel_setmode_tx);
+    }
+
     let menu_rx = MenuEvent::receiver();
+    let tray_rx = tray_icon::TrayIconEvent::receiver();
 
     loop {
-        // 限时泵：排空 win32 消息后让主线程周期醒来，处理菜单事件通道与
-        // 跨线程通道（均可能无对应 win32 消息可排）。
-        if pump_once(Some(Duration::from_millis(200)))? {
+        // 限时泵 + 命名事件：排空 win32 消息后让主线程周期醒来，处理菜单/
+        // 托盘事件与跨线程通道（均可能无对应 win32 消息可排）。
+        let pump = pump_once(Some(Duration::from_millis(200)), Some(&wake_event))?;
+        if pump.processed {
             // 还有积压消息：先不碰通道，下一拍继续排空。
             continue;
         }
+        if pump.woke {
+            log::info!("Show-GUI request received");
+            show_gui(&gui, &snapshot, &panel_redial_tx, &panel_setmode_tx);
+        }
 
+        // 左键单击托盘 → 打开日常 GUI（菜单已改为只右键弹）。
+        while let Ok(ev) = tray_rx.try_recv() {
+            if let tray_icon::TrayIconEvent::Click {
+                button: tray_icon::MouseButton::Left,
+                button_state: tray_icon::MouseButtonState::Up,
+                ..
+            } = ev
+            {
+                show_gui(&gui, &snapshot, &panel_redial_tx, &panel_setmode_tx);
+            }
+        }
         while let Ok(event) = menu_rx.try_recv() {
             if event.id == *mode_exclusive.id() {
                 send_set_mode(NetMode::WiredExclusive);
@@ -329,11 +475,7 @@ pub fn run_tray() -> Result<()> {
             } else if event.id == *redial_item.id() {
                 send_redial();
             } else if event.id == *panel_item.id() {
-                panel::show(
-                    Arc::clone(&snapshot),
-                    panel_redial_tx.clone(),
-                    panel_setmode_tx.clone(),
-                );
+                show_gui(&gui, &snapshot, &panel_redial_tx, &panel_setmode_tx);
             } else if event.id == *quit_item.id() {
                 std::process::exit(0);
             }
@@ -467,13 +609,19 @@ fn ipc_loop(snapshot: SharedSnapshot, status_tx: mpsc::Sender<String>) {
     }
 }
 
-/// 跑一拍 win32 消息泵。返回 true 表示处理了至少一条消息。
+/// 一拍泵结果：`processed` = 处理过消息（应 continue）；`woke` = 命名事件触发。
+struct Pump {
+    processed: bool,
+    woke: bool,
+}
+
+/// 跑一拍 win32 消息泵。`wake` 须为自动复位事件句柄。
 ///
 /// 有消息时排空队列并立即返回；无消息时按 `timeout`：
 /// - `None`：`GetMessageW` 无限阻塞等下一条；
-/// - 有值：`MsgWaitForMultipleObjects(QS_ALLINPUT)` 等到超时或有新消息，
-///   让主线程有机会周期醒来处理跨线程通道。
-fn pump_once(timeout: Option<Duration>) -> Result<bool> {
+/// - 有值：`MsgWaitForMultipleObjects(QS_ALLINPUT)` 等到超时、有新消息，
+///   或 `wake` 事件置位（跨进程"显示 GUI"请求）。
+fn pump_once(timeout: Option<Duration>, wake: Option<&HANDLE>) -> Result<Pump> {
     use windows::Win32::Foundation::{WAIT_OBJECT_0, WAIT_TIMEOUT};
     use windows::Win32::UI::WindowsAndMessaging::{
         DispatchMessageW, GetMessageW, MsgWaitForMultipleObjects, PeekMessageW, TranslateMessage,
@@ -494,7 +642,10 @@ fn pump_once(timeout: Option<Duration>) -> Result<bool> {
         processed = true;
     }
     if processed {
-        return Ok(true);
+        return Ok(Pump {
+            processed: true,
+            woke: false,
+        });
     }
     match timeout {
         None => {
@@ -511,13 +662,26 @@ fn pump_once(timeout: Option<Duration>) -> Result<bool> {
                 let _ = TranslateMessage(&msg);
                 DispatchMessageW(&msg);
             }
-            Ok(true)
+            Ok(Pump {
+                processed: true,
+                woke: false,
+            })
         }
         Some(d) => {
             let timeout_ms = u32::try_from(d.as_millis()).unwrap_or(INFINITE - 1);
-            let wake = unsafe { MsgWaitForMultipleObjects(None, false, timeout_ms, QS_ALLINPUT) };
-            debug_assert!(wake == WAIT_OBJECT_0 || wake == WAIT_TIMEOUT);
-            Ok(false)
+            let handles = wake.map(std::slice::from_ref);
+            let res = unsafe { MsgWaitForMultipleObjects(handles, false, timeout_ms, QS_ALLINPUT) };
+            if res == WAIT_TIMEOUT {
+                return Ok(Pump {
+                    processed: false,
+                    woke: false,
+                });
+            }
+            // 句柄下标 0 = wake 事件（自动复位会清除信号）；其余为输入待排空。
+            Ok(Pump {
+                processed: false,
+                woke: res == WAIT_OBJECT_0,
+            })
         }
     }
 }

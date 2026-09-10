@@ -1,8 +1,11 @@
-//! 详情面板：egui（eframe glow + default_fonts，ADR-0006）。
-//! 每次打开起独立线程跑 run_native（with_any_thread），关窗线程退。
-//! 旧 MessageBox 实现已删；黑屏根因是 default_fonts 被关，非核显。
+//! 日常状态窗口（常驻）：首次点开创建；关窗 = 隐藏；左键托盘唤出。
+//! egui/eframe glow（ADR-0006）；快照每帧拉取，操作经 mpsc 回泵线程发 IPC。
+//!
+//! Task 10 保留旧面板内容（英文）；Task 11 换成锁定视觉方向的中文界面。
 
 use std::sync::mpsc::Sender;
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use eframe::egui;
 use eframe::egui::{CentralPanel, Grid, ScrollArea, ViewportBuilder};
@@ -12,28 +15,45 @@ use crate::ipc::protocol::{NetMode, StateSnapshot};
 
 use super::SharedSnapshot;
 
-/// 打开状态面板：每次点击起独立 eframe 线程（winit any_thread），
-/// 关窗后 run_native 返回、线程退出。快照经 Arc 每帧拉取，操作经
-/// mpsc 送回泵线程统一发 IPC。
-pub fn show(snapshot: SharedSnapshot, redial_tx: Sender<()>, setmode_tx: Sender<NetMode>) {
+/// GUI 的 egui 上下文句柄：Some = 窗口线程活着（可能处于隐藏）。
+pub(crate) type GuiShared = Arc<Mutex<Option<egui::Context>>>;
+
+/// 显示或创建窗口；已存在则显示 + 聚焦。
+pub(crate) fn show_or_focus(
+    shared: GuiShared,
+    snapshot: SharedSnapshot,
+    redial_tx: Sender<()>,
+    setmode_tx: Sender<NetMode>,
+) {
+    if let Some(ctx) = shared.lock().ok().and_then(|g| g.clone()) {
+        ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+        ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+        ctx.request_repaint();
+        return;
+    }
+    let shared2 = Arc::clone(&shared);
     let _ = std::thread::Builder::new()
-        .name("gdut-net-panel".into())
+        .name("gdut-net-gui".into())
         .spawn(move || {
-            if let Err(e) = run_panel(snapshot, redial_tx, setmode_tx) {
-                log::error!("Panel exited: {e:#}");
+            if let Err(e) = run_window(Arc::clone(&shared2), snapshot, redial_tx, setmode_tx) {
+                log::error!("GUI window exited: {e:#}");
+            }
+            if let Ok(mut g) = shared2.lock() {
+                *g = None; // 线程退出后允许下次点击重建
             }
         });
 }
 
-fn run_panel(
+fn run_window(
+    shared: GuiShared,
     snapshot: SharedSnapshot,
     redial_tx: Sender<()>,
     setmode_tx: Sender<NetMode>,
 ) -> anyhow::Result<()> {
     let mut options = NativeOptions {
         viewport: ViewportBuilder::default()
-            .with_title("gdut-net")
-            .with_inner_size(egui::vec2(420.0, 360.0))
+            .with_title("GDUT Net")
+            .with_inner_size(egui::vec2(460.0, 540.0))
             .with_resizable(false),
         renderer: Renderer::Glow,
         ..Default::default()
@@ -43,11 +63,14 @@ fn run_panel(
         builder.with_any_thread(true);
     }));
     eframe::run_native(
-        "gdut-net-panel",
+        "gdut-net-gui",
         options,
         Box::new(move |cc| {
             cc.egui_ctx.set_visuals(egui::Visuals::light());
-            Ok(Box::new(Panel {
+            if let Ok(mut g) = shared.lock() {
+                *g = Some(cc.egui_ctx.clone());
+            }
+            Ok(Box::new(Gui {
                 snapshot,
                 redial_tx,
                 setmode_tx,
@@ -57,16 +80,21 @@ fn run_panel(
     .map_err(|e| anyhow::anyhow!("eframe failed: {e}"))
 }
 
-struct Panel {
+struct Gui {
     snapshot: SharedSnapshot,
     redial_tx: Sender<()>,
     setmode_tx: Sender<NetMode>,
 }
 
-impl eframe::App for Panel {
+impl eframe::App for Gui {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
-        ui.ctx()
-            .request_repaint_after(std::time::Duration::from_millis(500));
+        let ctx = ui.ctx().clone();
+        // 关窗 = 隐藏：取消关闭、窗口留活；托盘左键（或二次启动）再唤出。
+        if ctx.input(|i| i.viewport().close_requested()) {
+            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+        }
+        ctx.request_repaint_after(Duration::from_millis(500));
         CentralPanel::default().show(ui, |ui| {
             // 每帧拉一次快照（锁内只做 clone，不放 egui 绘制进锁）。
             let (wired, wireless, mode, events) = {

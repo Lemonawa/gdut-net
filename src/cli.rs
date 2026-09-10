@@ -64,6 +64,11 @@ pub enum WirelessAction {
 }
 
 pub fn dispatch() -> Result<()> {
+    // 双击 exe（无参数、无控制台）：已安装 → 托盘 + GUI；未安装 → 中文提示。
+    #[cfg(windows)]
+    if std::env::args().len() == 1 && !crate::tray::has_console() {
+        return crate::tray::double_click_entry();
+    }
     // Set UTF-8 code page before clap parses --help (clap prints and exits
     // before we reach later init; default GBK would garble UTF-8 help text).
     #[cfg(windows)]
@@ -73,9 +78,11 @@ pub fn dispatch() -> Result<()> {
     }
     let cli = Cli::parse();
     // Run branch (service dispatcher) does not install CLI logger: real
-    // logger is init after loading config via init_service_logging; other
-    // subcommands (install/uninstall/status/tray) use info-level stderr.
-    if !matches!(cli.cmd, Cmd::Run) {
+    // logger is init after loading config via init_service_logging. Tray
+    // installs its own ProgramData file logger in run_tray (double-click has
+    // no stderr either); other subcommands (install/uninstall/status) use
+    // info-level stderr.
+    if !matches!(cli.cmd, Cmd::Run | Cmd::Tray) {
         crate::logging::init_cli_logging();
     }
     match cli.cmd {
@@ -101,7 +108,7 @@ pub fn dispatch() -> Result<()> {
         #[cfg(not(windows))]
         Cmd::Status => bail!("status is only supported on Windows"),
         #[cfg(windows)]
-        Cmd::Tray => crate::tray::run_tray(),
+        Cmd::Tray => crate::tray::run_tray(false),
         #[cfg(not(windows))]
         Cmd::Tray => bail!("tray is only supported on Windows"),
         #[cfg(windows)]
