@@ -8,13 +8,18 @@ use windows::Win32::UI::WindowsAndMessaging::{MB_ICONERROR, MB_ICONWARNING, MESS
 
 pub mod silent;
 pub mod ui;
-// `pub mod work;` lands here in Task 8.
+pub mod work;
 
 pub use crate::setup_args::{Mode, SetupArgs};
 // 定义在 shell.rs（shell 不反向依赖 setup，避免模块环）；此处 re-export 供 UI/工作流使用。
 pub use crate::shell::START_MENU_FOLDER;
 
 pub const DATA_DIR: &str = r"C:\ProgramData\gdut-net";
+
+/// 配置文件路径：%ProgramData%\gdut-net\config.toml。
+pub fn config_path() -> PathBuf {
+    PathBuf::from(DATA_DIR).join("config.toml")
+}
 
 /// 安装目录：%ProgramFiles%\gdut-net。
 pub fn install_dir() -> PathBuf {
