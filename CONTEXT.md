@@ -121,7 +121,7 @@ _Avoid_: 界面（泛称）
 ### 脚本 / 部署（Windows 侧）
 - `*>&1 | Out-File` 会把英文 `WARN` 当 `NativeCommandError`；`switch-v4.ps1` 用 `cmd /c "type pw.txt | exe install ... >> log 2>&1"`。
 - `switch-v4.ps1` 成功检测搜英文 `Dial succeeded` / `dropped`——中文匹配永不命中。
-- `UAC ConsentPromptBehaviorAdmin=0 + EnableLUA=1` 会让 `Start-Process -Verb RunAs` 静默失败；免 UAC 靠计划任务 `gdut-switch`（`SYSTEM`，`AllowStartIfOnBatteries`，10min 超时），触发 `schtasks /Run /TN gdut-switch`。
+- `UAC ConsentPromptBehaviorAdmin=0 + EnableLUA=1` 会让 `Start-Process -Verb RunAs` 静默失败；免 UAC 靠计划任务 `gdut-switch`（实测身份：`Lemonawa`/交互式/最高权限——预授权任务所以不弹 UAC；`AllowStartIfOnBatteries`，10min 超时），触发 `schtasks /Run /TN gdut-switch`。**任务窗口可见**：中途关掉窗口 = Ctrl+C 杀掉脚本（退出码 `0xC000013A`）——换装和拨号通常已完成，但最后 75s 稳定性检查与 `SUCCESS` 日志会缺失（无实质影响）。要隐藏窗口需管理员：`schtasks /Change /TN gdut-switch /TR "powershell.exe -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File C:\Users\Lemonawa\Desktop\gdut-net\switch-v4.ps1"`。
 - `pw.txt` 用后即删（`switch-v4` 下次运行会重建），明文密码不落盘；`switch-v4.ps1` A0 只从 `gdut-net-new.exe` 部署（旧 zip 流已退役）。
 
 ### WSL（从 Linux 侧操作这台机器）

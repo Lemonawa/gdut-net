@@ -11,7 +11,7 @@
 | `gdut-net-new.exe` | （按需出现）下次要部署的新版。`switch-v4.ps1` 的 A0 步会自动把它扶正 |
 | `rollback.bat` / `rollback-v4.ps1` | 一键换回**旧版 gdut-net**（不是 Dr.COM）+ 重起服务。switch 失败后的第二道防线 |
 | `switch-v4.ps1` / `switch-v4.log` | gdut-net ↔ Dr.COM 完整切换（全自动+失败自回滚）。详见 AGENTS.md |
-| `一键切换.bat` | 触发计划任务 `gdut-switch` 跑 `switch-v4.ps1`（免 UAC），随后 tail 日志 |
+| `一键切换.bat` | 触发计划任务 `gdut-switch` 跑 `switch-v4.ps1`（免 UAC），随后 tail 日志；**脚本会弹第二个窗口，别关它**（关=杀脚本，退出码 `0xC000013A`，换装通常已完成但收尾检查缺失） |
 | `一键回校.bat` | （管理员）服务设自动+启动，等 `Dial succeeded`，30s 稳定检查；失败自动回滚到停止+手动 |
 | `一键回家.bat` | （管理员）在家用：停服务+设手动+杀托盘，防无效重拨和 toast 轰炸；不碰代理 |
 | `tray.bat` | 起托盘（模式切换/Redial/Details 面板） |
