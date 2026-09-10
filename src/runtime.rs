@@ -336,6 +336,10 @@ mod win {
                         continue;
                     };
                     guard.ensure(&[portal_ip, probe_ip], gw, a.ifindex);
+                    // 实测（2026-09-10 真机）：/32 路由写入后需数秒才在数据面
+                    // 生效（首个 SYN 直接超时，~2-8s 后恢复 302/200）。路由传播/
+                    // ARP 解析窗口。等一拍再发首个请求，避开首连竞态。
+                    sleep(Duration::from_secs(3)).await;
                     let url = portal::build_login_url(
                         &cfg.portal_url,
                         &cfg.user,

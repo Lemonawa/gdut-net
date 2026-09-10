@@ -53,6 +53,10 @@ pub fn cli_test(cfg_path: &Path) -> Result<()> {
     let mut guard = routes::RouteGuard::new();
     guard.ensure(&[portal_ip], gw, adapter.ifindex);
     let _teardown = Teardown(guard);
+    // 路由写入到数据面生效有数秒窗口（2026-09-10 真机：首 SYN 超时，~2-8s
+    // 后恢复）。等一拍再发首个请求，与 runtime manager 同源。
+    println!("Waiting 3s for route propagation ...");
+    std::thread::sleep(Duration::from_secs(3));
 
     let url = portal::build_login_url(
         &cfg.wireless.portal_url,
