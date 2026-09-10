@@ -1604,10 +1604,12 @@ if let Err(e) = crate::shell::remove_shell_integration() {
 
 - [ ] **Step 5: Real-machine check (safe subset).** Temporarily run a one-off `cargo xwin` build and, from an elevated PowerShell on Windows, call the shortcut+registry code through the setup wizard path once Task 8 lands. Until then verify only by cross-compile; the full shortcut check is in Task 12 (migration installs them for real).
 
-- [ ] **Step 6: Commit**
+- [ ] **Step 6 (added by ruling R6, spec §10): shortcut inventory as pure logic + consistency test.** Extract the `SHORTCUTS` table into a cfg-free `src/shell_shortcuts.rs` (`pub struct Shortcut { name, target, args, run_as_admin }`, `pub const SHORTCUTS`, `pub const EXTRA_TARGETS: &[&str] = &["gdut-net.exe", "gdut-net-setup.exe"]`), consumed by `shell.rs`. Add `tests/shell_shortcuts.rs`: exactly 10 entries with unique names; admin set == {回校模式, 回家模式, 无线体检, 卸载 GDUT Net}; 卸载 args == "--uninstall"; every target ASCII, no path separators, and either in `EXTRA_TARGETS` or an existing file in `packaging/payload/`. This closes the "快捷方式清单与 payload 一致性" test spec §10 promises.
+
+- [ ] **Step 7: Commit**
 
 ```bash
-git add src/shell.rs src/service.rs src/setup/mod.rs src/lib.rs Cargo.toml
+git add src/shell.rs src/shell_shortcuts.rs src/service.rs src/setup/mod.rs src/lib.rs tests/shell_shortcuts.rs Cargo.toml
 git commit -m "feat(shell): Start Menu shortcuts, uninstall key, delayed dir cleanup"
 ```
 
