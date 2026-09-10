@@ -88,12 +88,15 @@ impl IconKind {
     }
 }
 
-/// 从快照推图标语义：无线 Online 优先于有线状态（接管即蓝灯）；无快照
-/// 视为掉线灰灯。
+/// 从快照推图标语义：有线 Connected 优先绿灯（standby 有线健康时也显示有线在
+/// 用，spec §8）；有线不在线才轮到无线 Online 蓝灯；无快照视为掉线灰灯。
 fn icon_kind(s: Option<&StateSnapshot>) -> IconKind {
     match s {
         None => IconKind::Down,
-        Some(s) if s.wireless.phase == WPhase::Online => IconKind::WirelessUp,
+        Some(s) if s.wireless.phase == WPhase::Online => match s.status {
+            SessionStatus::Connected => IconKind::WiredUp,
+            _ => IconKind::WirelessUp,
+        },
         Some(s) => match s.status {
             SessionStatus::Connected => IconKind::WiredUp,
             SessionStatus::Backoff | SessionStatus::AuthFail | SessionStatus::Dialing => {

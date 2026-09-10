@@ -97,13 +97,27 @@ impl RouteGuard {
     }
 
     /// 幂等：确保 dests 的 /32 都经 gw@ifindex 存在，多余的删掉；失败仅记日志（warn）。
+    /// 以 (dest, gw, ifindex) 三元组记账：WLAN 重连换 ifindex/网关（真机观察
+    /// 15→16）时，旧元组不得短路新路径的添加——先删旧路径再按新路径重加。
     pub fn ensure(&mut self, dests: &[Ipv4Addr], gw: Ipv4Addr, ifindex: u32) {
         for d in dests {
-            if !self.added.iter().any(|(x, _, _)| x == d) {
-                match add(*d, gw, ifindex) {
-                    Ok(()) => self.added.push((*d, gw, ifindex)),
-                    Err(e) => log::warn!("RouteGuard add {d} failed (kept going): {e:#}"),
+            let want = (*d, gw, ifindex);
+            if self.added.contains(&want) {
+                continue;
+            }
+            self.added.retain(|(x, g, i)| {
+                if *x == *d {
+                    if let Err(e) = del(*x, *g, *i) {
+                        log::warn!("RouteGuard del stale {x} via {g}@{i} failed: {e:#}");
+                    }
+                    false
+                } else {
+                    true
                 }
+            });
+            match add(*d, gw, ifindex) {
+                Ok(()) => self.added.push(want),
+                Err(e) => log::warn!("RouteGuard add {d} failed (kept going): {e:#}"),
             }
         }
         self.added.retain(|(d, g, i)| {
@@ -189,6 +203,14 @@ impl RouteGuard {
             }
         }
         self.restore_metric();
+    }
+}
+
+/// 防御纵深（panic/unwind 亦须回滚）：Guard 离开作用域即 teardown；
+/// 幂等，显式 teardown 后的 Drop 为空操作。
+impl Drop for RouteGuard {
+    fn drop(&mut self) {
+        self.teardown();
     }
 }
 

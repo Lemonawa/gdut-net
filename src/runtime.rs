@@ -343,10 +343,13 @@ mod win {
                 Action::Associate => {
                     ev(&ev_tx, "Wireless: associating to campus SSID");
                     let p = cfg.profile.clone();
-                    if let Err(e) = tokio::task::spawn_blocking(move || wlan::associate(&p))
-                        .await
-                        .unwrap_or_else(|_| Err(anyhow!("join task panicked")))
-                    {
+                    // 长 await 必须与 stop 竞争：服务停止时从 await 点直接
+                    // break，循环后的收尾（路由/metric/断开）才会执行。
+                    let joined = tokio::select! {
+                        _ = stop.cancelled() => break,
+                        r = tokio::task::spawn_blocking(move || wlan::associate(&p)) => r,
+                    };
+                    if let Err(e) = joined.unwrap_or_else(|_| Err(anyhow!("join task panicked"))) {
                         log::warn!("Wireless associate failed (will retry): {e:#}");
                     }
                     join_since = Some(now());
@@ -354,7 +357,10 @@ mod win {
                 Action::Disassociate => {
                     ev(&ev_tx, "Wireless: releasing (wired healthy)");
                     guard.teardown();
-                    let _ = tokio::task::spawn_blocking(wlan::disassociate).await;
+                    tokio::select! {
+                        _ = stop.cancelled() => break,
+                        _ = tokio::task::spawn_blocking(wlan::disassociate) => {}
+                    }
                     verdict = None;
                 }
                 Action::PortalAuth => {
@@ -375,7 +381,10 @@ mod win {
                     // 实测（2026-09-10 真机）：/32 路由写入后需数秒才在数据面
                     // 生效（首个 SYN 直接超时，~2-8s 后恢复 302/200）。路由传播/
                     // ARP 解析窗口。等一拍再发首个请求，避开首连竞态。
-                    sleep(Duration::from_secs(3)).await;
+                    tokio::select! {
+                        _ = stop.cancelled() => break,
+                        _ = sleep(Duration::from_secs(3)) => {}
+                    }
                     let url = portal::build_login_url(
                         &cfg.portal_url,
                         &cfg.user,
@@ -391,9 +400,13 @@ mod win {
                     );
                     // 挂死会话兜底：portal_get 卡死不能把 Brain 永久钉在
                     // Authing——超时按认证失败回报（T4 carry-forward）。
-                    let r =
-                        tokio::time::timeout(PORTAL_AUTH_TIMEOUT, portal::portal_get(a.ipv4, &url))
-                            .await;
+                    let r = tokio::select! {
+                        _ = stop.cancelled() => break,
+                        r = tokio::time::timeout(
+                            PORTAL_AUTH_TIMEOUT,
+                            portal::portal_get(a.ipv4, &url),
+                        ) => r,
+                    };
                     let (ok, msg) = match r {
                         Ok(Some((code, body))) => match portal::parse_portal_reply(&body) {
                             PortalResult::Success => (true, "login ok".to_string()),
@@ -423,22 +436,29 @@ mod win {
                         continue;
                     };
                     let url = format!("http://{}/", cfg.probe_host);
-                    let v = probe_once(a.ipv4, a.gateway, &url).await;
+                    let v = tokio::select! {
+                        _ = stop.cancelled() => break,
+                        v = probe_once(a.ipv4, a.gateway, &url) => v,
+                    };
                     if v != ProbeVerdict::Alive {
                         ev(&ev_tx, &format!("Wireless probe: {v:?}"));
                     }
                     verdict = Some(v);
                 }
             }
-            // standby 模式幂等压制 WLAN metric；exclusive 模式还原（让位瞬间
-            // 解除压制，路由去留由后续 ensure/teardown 决定）。
+            // metric 压制：standby 常压；exclusive 仅接管窗口（有线会话不健康）
+            // 压——会话死但线还在时物理口被校园网墙，WLAN 必须压过它才有网。
+            // exclusive + 有线健康 = 让位瞬间：解除压制（路由去留由后续
+            // ensure/teardown 决定）。
             let mode = *mode_rx.borrow_and_update();
+            let wired_connected = *wired_rx.borrow_and_update();
             if let Some(a) = &wlan {
-                if mode == NetMode::WiredPlusStandby {
+                let takeover_active = mode == NetMode::WiredExclusive && !wired_connected;
+                if mode == NetMode::WiredPlusStandby || takeover_active {
                     guard.set_standby_metric(a.ifindex, cfg.standby_metric);
                 }
             }
-            if mode == NetMode::WiredExclusive {
+            if mode == NetMode::WiredExclusive && wired_connected {
                 guard.release_metric();
             }
             // Joining 超时 → 复位重关联（IP/DHCP 迟迟不来的场景）。
@@ -595,10 +615,13 @@ mod win {
             let handle = tokio::spawn(async move {
                 wireless_manager(mcfg, mstop, mode_rx, wired_rx, m_wl_tx, ev_tx).await;
             });
+            let panic_wl_tx = wl_tx.clone();
             tokio::spawn(async move {
                 match handle.await {
                     Ok(()) => log::info!("Wireless manager task finished"),
                     Err(e) if e.is_panic() => {
+                        // manager 已死：托盘/status 不能继续显示 "Wireless: Online"。
+                        let _ = panic_wl_tx.send(WirelessSnapshot::default());
                         log::error!("Wireless manager PANICKED (wireless disabled): {e}")
                     }
                     Err(e) => log::warn!("Wireless manager task join error: {e}"),
@@ -689,16 +712,21 @@ mod win {
                     let up = tokio::task::spawn_blocking(adapter::ethernet_link_up)
                         .await
                         .unwrap_or(None);
-                    if watchdog.eth_link() != up {
-                        log::info!("Ethernet link state: {up:?}");
-                        if watchdog.eth_link() == Some(false) && up == Some(true) {
-                            log::info!("Ethernet link restored, redialing immediately");
-                            events.push(unix_now(), "Ethernet link restored, redialing");
-                            watchdog.request_redial();
-                            run_state_machine = true;
+                    // 瞬时 None（采样失败/驱动抖动）不得覆盖已知链路态：否则
+                    // 拔线门控被洗掉，watchdog 会在无载波时拨号卡 756。启动
+                    // 采样仍允许落 None（尚无已知态可保）。
+                    if let Some(up) = up {
+                        if watchdog.eth_link() != Some(up) {
+                            log::info!("Ethernet link state: {:?}", Some(up));
+                            if watchdog.eth_link() == Some(false) {
+                                log::info!("Ethernet link restored, redialing immediately");
+                                events.push(unix_now(), "Ethernet link restored, redialing");
+                                watchdog.request_redial();
+                                run_state_machine = true;
+                            }
+                            watchdog.set_eth_link(Some(up));
+                            let _ = snap_tx.send(compose(watchdog.snapshot(), &events));
                         }
-                        watchdog.set_eth_link(up);
-                        let _ = snap_tx.send(compose(watchdog.snapshot(), &events));
                     }
                 }
                 // 钩子：心跳报 Error → Toast（节流）+ 立即推快照
@@ -747,9 +775,13 @@ mod win {
             let _ = snap_tx.send(snap.clone());
 
             // 钩子：连续重拨失败累计 ≥10 分钟未恢复 → Toast。
+            // 拔线暂停（last_drop_reason == "Ethernet link down"）不是失败：
+            // 此刻可能 WLAN 正在承载，弹凭据提示纯属误导，跳过。
             if snap.status == SessionStatus::Backoff || snap.status == SessionStatus::AuthFail {
                 let since = *failing_since.get_or_insert_with(Instant::now);
-                if since.elapsed() >= REDIAL_FAILING_TOAST_AFTER {
+                let link_down_pause =
+                    snap.last_drop_reason.as_deref() == Some("Ethernet link down");
+                if since.elapsed() >= REDIAL_FAILING_TOAST_AFTER && !link_down_pause {
                     notifier.fire(
                         "redial_failing",
                         "gdut-net network error",

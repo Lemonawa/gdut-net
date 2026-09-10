@@ -53,6 +53,8 @@ fn wireless_defaults_and_validation() {
     cfg.account.student_id = "202100000000".into();
     assert!(cfg.wireless.enabled);
     assert_eq!(cfg.wireless.profile, "gdut");
+    // 真机实测调参（final review）：100 保有线主路由、压过被墙物理口。
+    assert_eq!(cfg.wireless.standby_metric, 100);
     assert!(cfg.validate().is_ok());
 
     cfg.wireless.probe_host = "not-an-ip".into();

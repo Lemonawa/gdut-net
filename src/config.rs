@@ -137,8 +137,11 @@ fn default_takeover_after() -> u64 {
 fn default_release_after() -> u64 {
     10
 }
+/// standby/接管窗口 WLAN 接口 metric 压制目标。真机实测：PPP 有效 metric
+/// 26（1+25）、物理口 4250、WLAN 4270——100 保有线的同时，在 PPP 路由
+/// 消失的瞬间压过被墙的物理口。配置可覆盖（0 = 不压）。
 fn default_standby_metric() -> u32 {
-    10
+    100
 }
 
 impl Default for WirelessCfg {
