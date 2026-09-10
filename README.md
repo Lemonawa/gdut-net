@@ -70,7 +70,7 @@ wlan_ac_ip = "172.16.254.2"             # HEMC; Longdong/Dongfeng Road unverifie
 probe_host = "223.5.5.5"
 takeover_after_secs = 8
 release_after_secs = 10
-standby_metric = 10                     # 0 = do not suppress
+standby_metric = 100                    # 0 = do not suppress; between PPP (26) and physical (4250)
 
 [log]
 dir = "C:\\ProgramData\\gdut-net\\logs"

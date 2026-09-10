@@ -79,15 +79,62 @@ _Avoid_: 保活模式
 _Avoid_: 界面（泛称）
 
 **双出口 (Dual Egress)**:
-校园网同时存在 DHCP 物理口（172.17.x.x，默认路由 metric 0）与 PPP 会话口（`gdut`，10.30.x.x，metric 1）；两者隔离，互联网出站必须走 PPP，家中单出口无此问题。
+校园网同时存在 DHCP 物理口（172.17.x.x）与 PPP 会话口（`gdut`，10.30.x.x）；两者隔离，互联网出站必须走 PPP，家中单出口无此问题。注意 Windows 的**有效 metric = RouteMetric + InterfaceMetric**（本机实测：PPP 1+25=26，物理 0+4250=4250，WLAN 0+4270=4270）——只看 RouteMetric 会得出"物理口优先"的错误结论。
 
 ## Rules
 
 - 无线接管的一切发包（portal 登录、ICMP/HTTP 探针）显式绑 WLAN 适配器源 IP；WLAN 会话存活期间服务自管两条 /32 主机路由（portal 主机 + HTTP 探测目标，via WLAN 网关），否则 Mihomo TUN 覆盖路由下绑源 socket `ENETUNREACH`。增删与让位/切模式/服务停止三条出口绑定，启动清残留。
 - 含密码的 portal URL 永不落日志/事件尾巴（打码只留 host+path）。
+- **拔线期间绝不拨号**：无载波拨号会把 PPPoE 端口卡在 dialing 态，之后所有拨号返回 756 且重试无法清除（实测只能重启 RasMan/系统）。服务已内建：link gate（链路 down 时 5s 轮询不碰端口）+ 插线瞬间 `request_redial` + 连续 3 次 756/813 自动重启 RasMan。
+- **不得给 Mihomo 设 `interface-name`**（2026-09-10 实证）：显式绑 `gdut` 在无线接管时全超时（该接口不存在 → 每个出站硬错 `interface not found`，无回退）；mihomo auto-detect（sing-tun 按"非虚拟 up 接口中总有效 metric 最低者"）在本机自动正确选 `gdut`/`WLAN`。Merge.yaml 保持无此键，改后需完整重启 Verge（重合并只在进程重启时发生）。
+- WLAN 接口 metric 压制（standby 与 exclusive 接管期）：目标 100 —— 低于物理口 4250、高于 PPP 26，保证有线健康时有线优先、有线路径消失瞬间无线接替。切走/让位/停止时还原。
 - 心跳相关的一切发包绑定物理适配器，绑定失败（端口 61440 被官方客户端占用）视为兼容模式不可用，报错而非静默。
 - "掉线"以流量探测为准，不单看 RAS 状态。
-- 双出口下 TUN/代理出站必须显式绑 `gdut`（Mihomo `interface-name: gdut`；`auto-detect-interface` 会跟 metric 0 的物理口走，被墙），TUN MTU≤1400（PPPoE 1480 减开销）。
-- WSL 为 mirror 模式，跟随主机路由表；TUN 开 fake-ip 时直连失败是预期，只能走 TUN/代理。
+- WSL 为 mirror 模式，跟随主机路由表；直连走 TUN 即可（fake-ip 已退役为 redir-host）。
 - 查系统代理只信注册表 `HKCU\...\Internet Settings\ProxyEnable`，不信 GUI 开关（前后端脱节）；该值重启不清零；FlClashHelperService（SYSTEM 常驻，FlClash 关了也可能活着）会把它写回 1；Verge 守卫在 OFF 时已停可排除；`clash-verge-service` 不是 SCM 服务（sc 1060），只跑内核不管代理。
-- Verge 运行时配置注入点是 `profiles/Merge.yaml`（全局拓展配置），别手改生成的 `clash-verge.yaml`；回滚=删段后重选订阅。
+- Verge 运行时配置注入点是 `profiles/Merge.yaml`（全局拓展配置），别手改生成的 `clash-verge.yaml`；回滚=删段后完整重启 Verge。
+
+## 实测陷阱（2026-09-10 真机会战）
+
+- **`SOCKADDR_IN.S_addr` 必须网络序**：`u32::from(ip)` 直接存入 LE 内存是字节反序，`CreateIpForwardEntry2` 会把 10.0.3.2 写成 2.3.0.10（route print 实锤）。用 `wireless::ipv4_to_s_addr`/`s_addr_to_ipv4`（`to_be()` 换算，两端各一次）。
+- **`MIB_*_TABLE2` 的定长 `[T; 1]` 字段不可索引**：>1 条记录即越界 panic（本机 ~100 条路由，manager 启动即死且 tokio 静默吞掉）。一律 `from_raw_parts(Table.as_ptr(), NumEntries)` 变长视图；同教训见 `WLAN_INTERFACE_INFO_LIST.InterfaceInfo`。
+- **事件唤醒不得驱动状态机**：快照推送等事件若让主循环顺带跑 `run_once`，退避 sleep 被 2s 一切碎（实测 7 分钟重拨 79 次、探针 30s→2s）。主循环用"绝对唤醒时刻 + 剩余时长"并只在计时到点/显式命令时跑状态机。
+- **eportal 回包语义**：`result:1`=成功；`result:0`+`ret_code:2`=该 IP 已在线（视为成功，别重试）；`result:0`+`ret_code:1`=密码错。按 `ret_code` 区分，勿匹配中文 msg。
+- **绑源 SYN 偶发被丢**（校园 AC 对未认证 MAC 的限流，官方客户端同样受）：单次 socket 8s 超时（覆盖 Windows SYN 重传 1s/2s/4s），CLI 三连试，manager 侧 5/15/30 退避重试兜底。
+- **无线接管窗口实测**：拔线 → `Ethernet link down, dial paused` → portal 登录 ≈13s；插线 → 1.5s 拨上 → 10s 后 WLAN 让位，/32 清 0、metric 还原。
+- **mihomo 接口缓存 TTL 20s**（sing-tun `singledo.NewSingle(20s)`）：接口消失后旧绑定最长 20s 内自愈，无需重启内核。
+
+## 工程与运维陷阱（真机实战）
+
+### RAS / 拨号
+- `RasEnumConnectionsW` 缓冲元素 `dwSize` 必须预置 `sizeof(RASCONNW)`，否则 `632 ERROR_INVALID_SIZE`；pbk 比较用 `pbk_eq_ci`（大小写不敏感）。
+- `RasSetEntryPropertiesW` 返回 `816`（端口占用）视为成功（端口释放后可拨），勿当硬错。
+- 无载波拨号会把 PPPoE 端口卡在 dialing 态 → 之后所有拨号 `756`，重试无法清除（详见上文 Rules + link gate 设计）。
+- `service` 停止后进程可能残留致重装 `1073`；`service_run` 显式 `std::process::exit` 兜底；`install` 幂等（`1073` → `change_config`）。
+
+### 探针 / 配置
+- `http_probe_url` 仅接受 `http://` + IPv4 字面量（`probe::parse_http_probe_target` 单一实现复用）；`9.9.9.9` 被校园网墙，默认 `223.5.5.5`；gateway `0.0.0.0` 时 ICMP 目标退化为 `223.5.5.5`。
+
+### IPC / 服务
+- 命名管道默认 DACL 拒绝用户会话：服务（SYSTEM/Session 0）建管必须挂 SDDL `D:(A;;GRGW;;;AU)`（经 `create_with_security_attributes_raw`），否则托盘/`status` 报 `os error 5`；改动只在服务重启后生效。
+
+### 脚本 / 部署（Windows 侧）
+- `*>&1 | Out-File` 会把英文 `WARN` 当 `NativeCommandError`；`switch-v4.ps1` 用 `cmd /c "type pw.txt | exe install ... >> log 2>&1"`。
+- `switch-v4.ps1` 成功检测搜英文 `Dial succeeded` / `dropped`——中文匹配永不命中。
+- `UAC ConsentPromptBehaviorAdmin=0 + EnableLUA=1` 会让 `Start-Process -Verb RunAs` 静默失败；免 UAC 靠计划任务 `gdut-switch`（`SYSTEM`，`AllowStartIfOnBatteries`，10min 超时），触发 `schtasks /Run /TN gdut-switch`。
+- `pw.txt` 用后即删（`switch-v4` 下次运行会重建），明文密码不落盘；`switch-v4.ps1` A0 只从 `gdut-net-new.exe` 部署（旧 zip 流已退役）。
+
+### WSL（从 Linux 侧操作这台机器）
+- `powershell.exe` 不在 PATH：WinPS 5.1 = `/mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe`；ps7（应用商店版）= `/mnt/c/Users/Lemonawa/AppData/Local/Microsoft/WindowsApps/pwsh.exe`。
+- 从 WSL 提权常被 UAC 拦（`-Verb RunAs` 静默失败）；改用计划任务或让用户执行。
+- `/mnt/c/ProgramData/**` 等受保护路径对 WSL 只读——改配置走程序自身（`install` 幂等重写 config）或 Windows 管理员侧。
+
+### 代理 / Verge 排障
+- `ProxyEnable` 存 HKCU 重启不清零；是否翻回只看自启动项（`HKCU/HKLM\...\Run` 应无 FlClash/Verge/clash 系）。回写是事件驱动的（FlClash HelperService 定时写回，GUI 开关脱节）；深挖用注册表审计（中文系统 auditpol 子类别"注册表"）+ `Get-WinEvent ID=4657` 看进程名；历史定案是改 `Connections\gdut` blob（flags bit1）+ `MigrateProxy` 置 0，而非杀进程。
+- Verge 改 `Merge.yaml` 必须**完整退出并重启 Verge 进程**才重新合并；TUN 状态看 `Get-NetAdapter Mihomo` + `0.0.0.0/0` 路由在不在。
+- fake-ip 已退役为 redir-host（频繁重启内核 + 系统 DNS 缓存下，旧映射进缓存即 RST）；国外慢先换节点再怪内核（固定 5.1s×N 次 = 节点晚高峰）。
+- **拨 TUN 开关必重启 opencode/长连接进程**（TCP 无迁移，SSE 静默死亡）；判新老连接用 `curl ai.lma.moe/v1/models`（401 = 新连接活）。
+- Tailscale 家↔校不能直连（校园 CGNAT = 对称 NAT + 端口重写 + 多 ISP 池；家路由器按远端过滤）；修复在家侧：开 UPnP 或转发 UDP 41641→192.168.5.11；全案 `docs/tailscale-p2p.md`。
+
+### 给用户的断网窗口操作
+- 必须自带回滚块（能独立执行；网络炸了用户侧无 AI 可达）。

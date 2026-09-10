@@ -40,8 +40,9 @@ reg query "HKLM\SYSTEM\CurrentControlSet\Services\EventLog\Application\gdut-net"
 ## 托盘与状态（用户会话）
 
 ```powershell
-.\gdut-net.exe tray      # 托盘青色图标；菜单 Status / Redial now / Details / Exit
-.\gdut-net.exe status    # 终端打印：状态、在线时长、IP、掉线原因、重拨次数、心跳
+.\gdut-net.exe tray      # 托盘图标按状态变色：绿=有线通 / 蓝=无线在用 / 黄=退避 / 灰=断
+                         # 右键菜单：模式二选一（CheckMenuItem）、Redial now、Details（egui 面板）、Exit
+.\gdut-net.exe status    # 终端打印：状态、在线时长、IP、掉线原因、重拨次数、心跳、Mode、Wireless、Events
 ```
 
 ## 无线接管（v0.3）
@@ -55,8 +56,10 @@ reg query "HKLM\SYSTEM\CurrentControlSet\Services\EventLog\Application\gdut-net"
 
 | # | 标准 | 验证方法 |
 |---|---|---|
-| 6 | exclusive：拔线 ≤15s 无线可用 | `Get-Content ...log -Wait` 观察 "associating" → "portal login success"；插回线 ≤20s 出现 "releasing"；`netsh wlan show interfaces` 回 Disconnected |
-| 7 | standby：拔线零感知 | 托盘切 "Wired + wireless standby"，常驻 ping 窗口拔线观察丢包 ≤2 个；插回线 WLAN 不断（仍 Online） |
-| 8 | 模式持久化 | 切 standby → `net stop/start gdut-net` → status 的 Mode 仍为 standby |
-| 9 | 路由无残留 | 服务停止后 `route print` 无 `10.0.3.2 /32`、`223.5.5.5 /32`；WLAN metric 还原（`Get-NetIPInterface -InterfaceAlias WLAN`） |
-| 10 | TUN 共存 | Mihomo TUN 开着跑 6/7 两项（/32 由服务自管，ADR-0005） |
+| 6 | exclusive：拔线无线接管 | 日志依次出现 `Ethernet link down, dial paused` → `Wireless: associating` → `Wireless: portal login success`（实测 ≈13s）；期间**不得出现** `Dial failed`（link gate 生效，拔线不碰 PPPoE 端口） |
+| 7 | 插回有线立即恢复 | 日志 `Ethernet link restored, redialing immediately` → `Dial succeeded`（实测 1.5s）→ 10s 后 `Wireless: releasing`；`netsh wlan show interfaces` 回 Disconnected |
+| 8 | standby：拔线零感知 | 托盘切 "Wired + wireless standby"，常驻 ping 窗口拔线观察丢包 ≤2 个；插回线 WLAN 不断（仍 Online） |
+| 9 | 模式持久化 | 切 standby → `net stop/start gdut-net` → status 的 Mode 仍为 standby |
+| 10 | 路由/指标无残留 | 服务停止后 `route print` 无 `10.0.3.2 /32`、`223.5.5.5 /32`；WLAN metric 还原 4270（`Get-NetIPInterface -InterfaceAlias WLAN`） |
+| 11 | TUN 共存（四组合） | Mihomo TUN 开/关 × 有/无线，各跑一次 `curl -x http://127.0.0.1:7890 https://www.gstatic.com/generate_204`（期望 204）；Clash Verge 延迟测试有数字。前置：Merge.yaml 无 `interface-name`（2026-09-10 起，mihomo auto-detect 自动选 gdut/WLAN） |
+| 12 | RasMan 卡死自愈（内建未实测） | 人为制造：无网线状态下让旧流程拨号 → 连续 756 时观察 `Dial port stuck (error 756 x3), restarting RasMan` 与 `RasMan restarted, port state cleared`；插线后能拨通。若服务无权限停/启 RasMan，日志为 warn 且不影响其他功能 |
