@@ -9,6 +9,7 @@ pub mod ipc;
 pub mod logging;
 #[cfg(windows)]
 pub mod notify;
+pub mod payload;
 pub mod probe;
 pub mod ras;
 #[cfg(windows)]

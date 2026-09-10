@@ -31,6 +31,10 @@ md4 = "0.11"
 rand = "0.10"
 socket2 = "0.6"
 tokio-util = "0.7"
+sha2 = "0.10"
+
+[dev-dependencies]
+tempfile = "3"
 
 [target.'cfg(windows)'.dependencies]
 eframe = { version = "0.36", default-features = false, features = ["glow", "default_fonts"] }
