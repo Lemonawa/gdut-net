@@ -2,6 +2,8 @@
 
 2026-09-11 起，本机运行的是**安装形态**：程序与脚本都在 `C:\Program Files\gdut-net\`，配置/日志在 `C:\ProgramData\gdut-net\`，日常入口在开始菜单 **GDUT Net** 文件夹。桌面文件夹 `C:\Users\Lemonawa\Desktop\gdut-net\` 只作 fallback 保留（确认长期稳定后可删）。
 
+桌面工具包现状（2026-09-11 清理）：只保留部署与回滚必需品——`一键切换.bat`（部署入口）、`rollback.bat` / `rollback-v4.ps1`（应急回滚）、`gdut-net-setup.exe`（下次部署包）、`gdut-net.exe`（switch 失败时的回滚目标）、`gdut-net-bak.exe`（换回旧版的回滚件）、`personal/`（部署源，含 switch-v4.ps1）与 `tun-watch.ps1`；旧的入口脚本、旧日志与个人说明已清走。`switch-v4.ps1` 仍从该目录读部署包，别把 `gdut-net-setup.exe` 挪走。
+
 个人运维脚本（不进公开发布 payload）与产品脚本同居安装目录——这是有意为之：回滚链在断网时无 AI 可达，脚本必须和 exe 在一起、位置无关。
 
 ## 开始菜单入口（10 项）
