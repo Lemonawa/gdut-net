@@ -30,7 +30,7 @@ use windows::Win32::System::Threading::{CreateEventW, INFINITE};
 use crate::ipc::client::PipeClient;
 use crate::ipc::protocol::{Command, NetMode, SessionStatus, StateSnapshot, WPhase};
 
-use gui::GuiShared;
+use gui::{GuiShared, GuiState};
 
 /// 后台线程 connect 失败后的重试间隔。
 const CONNECT_RETRY: Duration = Duration::from_secs(3);
@@ -352,6 +352,9 @@ pub fn unregister_autostart() -> Result<()> {
 /// `show_gui_at_start=true`（双击入口）：托盘就绪后立刻弹出 GUI。
 /// 已有实例在跑时改为置位命名事件唤出它的窗口，本进程直接退出。
 pub fn run_tray(show_gui_at_start: bool) -> Result<()> {
+    // 先装文件日志（托盘无 stderr），单实例守卫的 warn 也得有落点；
+    // 句柄活到进程退出（泵循环内不 drop），Secondary 分支安装后即退出，无害。
+    let _logger = crate::logging::init_tray_logging(r"C:\ProgramData\gdut-net\logs", "tray");
     let _singleton = match acquire_singleton() {
         Singleton::Primary(h) => h,
         Singleton::Secondary => {
@@ -359,7 +362,6 @@ pub fn run_tray(show_gui_at_start: bool) -> Result<()> {
             return Ok(());
         }
     };
-    crate::logging::init_tray_logging(r"C:\ProgramData\gdut-net\logs", "tray");
     register_aumid();
 
     let snapshot: SharedSnapshot = Arc::new(Mutex::new(None));
@@ -435,7 +437,7 @@ pub fn run_tray(show_gui_at_start: bool) -> Result<()> {
         unsafe { CreateEventW(None, false, false, PCWSTR(name.as_ptr())) }
             .context("Failed to create tray show event")?
     };
-    let gui: GuiShared = Arc::new(Mutex::new(None));
+    let gui: GuiShared = Arc::new(Mutex::new(GuiState::Absent));
     if show_gui_at_start {
         show_gui(&gui, &snapshot, &panel_redial_tx, &panel_setmode_tx);
     }

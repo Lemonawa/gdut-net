@@ -30,7 +30,8 @@ const VERMILION: egui::Color32 = egui::Color32::from_rgb(0xC0, 0x39, 0x2B);
 
 pub fn run(args: SetupArgs) -> Result<()> {
     // GUI 安装器无 stderr（windows 子系统）：写 ProgramData 文件日志。
-    crate::logging::init_tray_logging(r"C:\ProgramData\gdut-net\logs", "setup");
+    // 句柄活到 run_native 返回（GUI 全程）；进程随后退出，符合进程生命周期。
+    let _logger = crate::logging::init_tray_logging(r"C:\ProgramData\gdut-net\logs", "setup");
     let state = crate::service::install_state();
     let options = eframe::NativeOptions {
         viewport: ViewportBuilder::default()
@@ -816,12 +817,14 @@ impl SetupApp {
 
     // ---- 外部动作 ----
 
-    /// 打开日常界面（安装目录的 gdut-net.exe tray）。
+    /// 打开日常界面（安装目录的 gdut-net.exe）。
+    ///
+    /// 经 explorer 去提权启动且**不带参数**：无参双击路径自己判断——已安装
+    /// 就起托盘 + 弹 GUI，托盘已在跑就唤出它的窗口；setup 是管理员进程，
+    /// 直接 spawn 会把托盘提权启动（违背会话进程设计）。
     fn open_tray(&self) {
-        if let Err(e) = std::process::Command::new(install_dir().join("gdut-net.exe"))
-            .arg("tray")
-            .spawn()
-        {
+        let exe = install_dir().join("gdut-net.exe");
+        if let Err(e) = std::process::Command::new("explorer").arg(&exe).spawn() {
             log::warn!("Failed to open tray: {e}");
         }
     }

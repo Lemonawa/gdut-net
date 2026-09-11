@@ -30,12 +30,13 @@ pub fn init_cli_logging() {
 }
 
 /// 托盘 / 安装器 GUI 进程没有 stderr（windows 子系统）：写 ProgramData 文件日志。
-/// 失败静默（最坏情况无日志，不阻断 UI 启动）。
+/// 失败静默（最坏情况无日志，不阻断 UI 启动）。成功返回 [`LoggerHandle`]，
+/// 调用方必须持有到进程退出（Drop 会 flush 并停掉后台清理线程）。
 ///
 /// 本进程内必须先于 [`init_cli_logging`] 调用：全局 logger 只能安装一次。
-pub fn init_tray_logging(log_dir: &str, basename: &str) {
+pub fn init_tray_logging(log_dir: &str, basename: &str) -> Option<LoggerHandle> {
     let _ = std::fs::create_dir_all(log_dir);
-    let result = Logger::try_with_str("info").map(|logger| {
+    let result = Logger::try_with_str("info").and_then(|logger| {
         logger
             .log_to_file(FileSpec::default().directory(log_dir).basename(basename))
             .append()
@@ -46,8 +47,12 @@ pub fn init_tray_logging(log_dir: &str, basename: &str) {
             )
             .start()
     });
-    if let Err(e) = result {
-        eprintln!("Failed to init {basename} logging (continuing): {e:#}");
+    match result {
+        Ok(handle) => Some(handle),
+        Err(e) => {
+            eprintln!("Failed to init {basename} logging (continuing): {e:#}");
+            None
+        }
     }
 }
 

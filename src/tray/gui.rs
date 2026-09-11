@@ -15,33 +15,91 @@ use crate::ipc::protocol::{NetMode, StateSnapshot};
 
 use super::SharedSnapshot;
 
-/// GUI 的 egui 上下文句柄：Some = 窗口线程活着（可能处于隐藏）。
-pub(crate) type GuiShared = Arc<Mutex<Option<egui::Context>>>;
+/// GUI 状态机：Absent → Starting → Live；窗口线程退出后一律 Dead 终态。
+///
+/// winit 0.30 每进程只允许一个事件循环（EVENT_LOOP_CREATED 置位后不复位），
+/// 所以 `run_native` 一旦返回（正常结束或初始化失败），本进程都不可能再建
+/// 第二个窗口——重建分支不存在，Starting 也绝不能留在状态里。
+pub(crate) enum GuiState {
+    /// 尚未创建（或线程 spawn 失败，可重试）。
+    Absent,
+    /// 正在创建：single-flight 占位，窗口出现后自会可见。
+    Starting,
+    /// 窗口线程活着（可能处于隐藏）。
+    Live(egui::Context),
+    /// 终态：事件循环已结束，无法再显示（附原因）。
+    Dead(String),
+}
+
+/// GUI 状态句柄。
+pub(crate) type GuiShared = Arc<Mutex<GuiState>>;
 
 /// 显示或创建窗口；已存在则显示 + 聚焦。
+///
+/// single-flight：持锁判定 + 置位，只有一个调用能走到 `spawn`；`Starting`
+/// 期间（含双击连发的第二次点击）直接返回——正在创建的窗口会自行显示。
 pub(crate) fn show_or_focus(
     shared: GuiShared,
     snapshot: SharedSnapshot,
     redial_tx: Sender<()>,
     setmode_tx: Sender<NetMode>,
 ) {
-    if let Some(ctx) = shared.lock().ok().and_then(|g| g.clone()) {
-        ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
-        ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
-        ctx.request_repaint();
-        return;
+    let mut state = match shared.lock() {
+        Ok(g) => g,
+        Err(_) => return, // 锁中毒：无从安全恢复，静默放弃本次显示
+    };
+    match &*state {
+        // 已存在：显示 + 聚焦。克隆 ctx 后放开锁再做跨线程唤醒。
+        GuiState::Live(ctx) => {
+            let ctx = ctx.clone();
+            drop(state);
+            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+            ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+            ctx.request_repaint();
+            return;
+        }
+        // 正在创建：窗口首次显示即在前台，无需额外动作。
+        GuiState::Starting => return,
+        // 终态：事件循环已结束，本进程内无法再建（winit 0.30 单事件循环），
+        // 重试也不会成功，只记英文 warn（泵线程不做 MessageBox）。
+        GuiState::Dead(reason) => {
+            log::warn!("GUI window unavailable: {reason}");
+            return;
+        }
+        // 首次：置 Starting 占位（single-flight）。
+        GuiState::Absent => *state = GuiState::Starting,
     }
+    drop(state);
+
     let shared2 = Arc::clone(&shared);
-    let _ = std::thread::Builder::new()
+    let spawned = std::thread::Builder::new()
         .name("gdut-net-gui".into())
         .spawn(move || {
-            if let Err(e) = run_window(Arc::clone(&shared2), snapshot, redial_tx, setmode_tx) {
+            // panic 也是退出路径：catch 住后同样落 Dead，绝不把 Starting 留下。
+            let result = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                run_window(Arc::clone(&shared2), snapshot, redial_tx, setmode_tx)
+            })) {
+                Ok(r) => r,
+                Err(_) => Err(anyhow::anyhow!("GUI thread panicked")),
+            };
+            let reason = match &result {
+                Ok(()) => "window closed".to_string(),
+                Err(e) => format!("{e:#}"),
+            };
+            if let Err(e) = &result {
                 log::error!("GUI window exited: {e:#}");
             }
             if let Ok(mut g) = shared2.lock() {
-                *g = None; // 线程退出后允许下次点击重建
+                // run_native 返回 = 事件循环结束：Ok/Err 都进终态，绝不留 Starting。
+                *g = GuiState::Dead(reason);
             }
         });
+    if let Err(e) = spawned {
+        log::error!("Failed to start GUI window thread: {e}");
+        if let Ok(mut g) = shared.lock() {
+            *g = GuiState::Absent; // 线程根本没起来：允许下次点击重试
+        }
+    }
 }
 
 fn run_window(
@@ -68,7 +126,7 @@ fn run_window(
         Box::new(move |cc| {
             cc.egui_ctx.set_visuals(egui::Visuals::light());
             if let Ok(mut g) = shared.lock() {
-                *g = Some(cc.egui_ctx.clone());
+                *g = GuiState::Live(cc.egui_ctx.clone());
             }
             Ok(Box::new(Gui {
                 snapshot,
