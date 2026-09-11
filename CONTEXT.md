@@ -75,8 +75,20 @@ _Avoid_: 保活模式
 服务器下发的特殊响应，携带协议 flag/版本信息，客户端需从中学习参数。
 
 **托盘 (Tray)**:
-用户会话内的常驻 UI 进程，展示会话状态并在守护异常时弹系统通知；与服务 IPC，不参与拨号。
+用户会话内的常驻 UI 进程，展示会话状态并在守护异常时弹系统通知；与服务 IPC，不参与拨号。左键弹出中文日常窗口，右键原生中文菜单；单实例（再启动只唤出已有窗口）。
 _Avoid_: 界面（泛称）
+
+**日常界面 (Daily GUI)**:
+托盘进程内的常驻 egui 窗口（中文）：状态卡、立即重拨、模式切换、修改账号密码、最近事件、打开日志。关窗=隐藏，进程不退。ADR-0007。
+
+**安装器 (Setup)**:
+`gdut-net-setup.exe`，单文件发布物（尾部内嵌载荷容器）。自提权、中文向导（欢迎/账号/进度/完成）+ 维护页（修复/卸载）。`--silent [--keep-password]` 为英文控制台的无界面模式。ADR-0007。
+
+**载荷容器 (Payload Container)**:
+setup 文件尾部追加 `[files][TOC][footer]` 的自定义容器：footer 24B，magic `GDUTPAK1` + u32 版本 + u32 条目数 + u64 TOC 偏移；每项 {文件名, offset, len, sha256}。截断/坏包/校验失败 = 拒绝安装，绝不半装。`src/payload.rs`。
+
+**语言策略 (Language Policy)**:
+控制台英文（CLI/日志/脚本/`.bat`/`.ps1` 回显——中文 Windows 控制台 GBK 乱码）；GUI 中文（安装器/日常窗口/托盘菜单/`说明.txt`——系统字体渲染，面向学生用户）。ADR-0007。
 
 **双出口 (Dual Egress)**:
 校园网同时存在 DHCP 物理口（172.17.x.x）与 PPP 会话口（`gdut`，10.30.x.x）；两者隔离，互联网出站必须走 PPP，家中单出口无此问题。注意 Windows 的**有效 metric = RouteMetric + InterfaceMetric**（本机实测：PPP 1+25=26，物理 0+4250=4250，WLAN 0+4270=4270）——只看 RouteMetric 会得出"物理口优先"的错误结论。
@@ -117,16 +129,28 @@ _Avoid_: 界面（泛称）
 
 ### IPC / 服务
 - 命名管道默认 DACL 拒绝用户会话：服务（SYSTEM/Session 0）建管必须挂 SDDL `D:(A;;GRGW;;;AU)`（经 `create_with_security_attributes_raw`），否则托盘/`status` 报 `os error 5`；改动只在服务重启后生效。
+- 托盘单实例 = 命名 mutex `gdut-net-tray-singleton` + 唤出命名事件 `gdut-net-tray-show`（自动复位）。二次启动：抢 mutex 失败 → `SetEvent` 唤出已有窗口 → 本进程直接退出，不产生第二个图标。
+
+### 安装器 / GUI 陷阱
+- setup 与托盘都是 **GUI 子系统（`windows_subsystem`），没有 stdout/stderr**：silent 模式输出必须经 PowerShell 管道捕获（`& $setup --silent --keep-password 2>&1 | Out-String` + `$LASTEXITCODE`；裸 cmd 重定向会丢输出——`wireless-test.bat` 同一模式）。GUI 模式启动失败走原生 `MessageBoxW` 弹窗，否则窗口一闪而逝。
+- 文件日志：托盘 `tray_r*.log`、setup `setup_r*.log`（滚 5MB×2），都在 `C:\ProgramData\gdut-net\logs\`；服务日志仍是 `gdut-net_r*.log`。GUI 进程崩溃只记日志，不影响服务。
+- setup 载荷容器：`[setup][files][TOC][24B footer]`，magic `GDUTPAK1`；从文件尾读 footer，逐项 sha256 校验。开发态（未打包）回退读自身旁边 `payload/` 目录；发布物被截断/篡改 = 明确报错拒绝安装。
+- 安装目录删除要延迟重试（`schedule_install_dir_removal`，cmd 循环 90×1s + `CREATE_NO_WINDOW|DETACHED_PROCESS`）：setup 窗口/开始菜单快捷方式会占用目录；`.arg()` 会把引号转义成 `\"` 而 cmd 不认——必须 `raw_arg` 原样传。
+- 开始菜单快捷方式工作目录 = 安装目录；管理员项（campus/home/无线体检/卸载）带 `SLDF_RUNAS_USER`（盾牌）。
+- egui 默认字体无 CJK 字形：GUI 必须加载系统字体（`msyh.ttc`，回退 `simhei.ttf`/`simsun.ttc`），找不到报错页而不是静默方块（ADR-0006 同源教训）。
 
 ### 脚本 / 部署（Windows 侧）
-- `*>&1 | Out-File` 会把英文 `WARN` 当 `NativeCommandError`；`switch-v4.ps1` 用 `cmd /c "type pw.txt | exe install ... >> log 2>&1"`。
+- `*>&1 | Out-File` 会把英文 `WARN` 当 `NativeCommandError`；GUI 子系统 exe（setup/tray）直接重定向丢输出——`switch-v4.ps1` 用 `& $setup --silent --keep-password 2>&1 | Out-String` + `$LASTEXITCODE` 捕获。
 - `switch-v4.ps1` 成功检测搜英文 `Dial succeeded` / `dropped`——中文匹配永不命中。
-- `UAC ConsentPromptBehaviorAdmin=0 + EnableLUA=1` 会让 `Start-Process -Verb RunAs` 静默失败；免 UAC 靠计划任务 `gdut-switch`（实测身份：`Lemonawa`/交互式/最高权限——预授权任务所以不弹 UAC；`AllowStartIfOnBatteries`，10min 超时），触发 `schtasks /Run /TN gdut-switch`。**任务窗口可见**：中途关掉窗口 = Ctrl+C 杀掉脚本（退出码 `0xC000013A`）——换装和拨号通常已完成，但最后 75s 稳定性检查与 `SUCCESS` 日志会缺失（无实质影响）。要隐藏窗口需管理员：`schtasks /Change /TN gdut-switch /TR "powershell.exe -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File C:\Users\Lemonawa\Desktop\gdut-net\switch-v4.ps1"`。
-- `pw.txt` 用后即删（`switch-v4` 下次运行会重建），明文密码不落盘；`switch-v4.ps1` A0 只从 `gdut-net-new.exe` 部署（旧 zip 流已退役）。
+- `UAC ConsentPromptBehaviorAdmin=0 + EnableLUA=1` 下的 RunAs 行为（2026-09-11 修正）：**可能自动提权成功，也可能失败，取决于策略**——2026-09-11 实测 `ShellExecuteExW "runas"`（setup 自提权）在本机直接成功、无提示；旧记录"RunAs 静默失败"不再是当前行为。免 UAC 的**预授权通道**仍是计划任务 `gdut-switch`（实测身份：`Lemonawa`/交互式/最高权限——所以不弹 UAC；`AllowStartIfOnBatteries`，10min 超时），触发 `schtasks /Run /TN gdut-switch`。**任务窗口可见**：中途关掉窗口 = Ctrl+C 杀掉脚本（退出码 `0xC000013A`）——换装和拨号通常已完成，但最后 75s 稳定性检查与 `SUCCESS` 日志会缺失（无实质影响）。要隐藏窗口/改任务指向，别用 `schtasks /TR` 拼引号（`\"` 不是 PowerShell 转义，R8 实测 ParserError）：管理员用 `Set-ScheduledTask -TaskName gdut-switch -Action (New-ScheduledTaskAction -Execute 'powershell.exe' -Argument '-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File "C:\Program Files\gdut-net\switch-v4.ps1"')`，再用 `schtasks /Query /TN gdut-switch /V /FO LIST` 核对。
+- 部署形态（2026-09-11）：产品安装到 `C:\Program Files\gdut-net\`（服务路径、HKCU Run 托盘自启、计划任务 `gdut-switch` 全指向这里），开始菜单 `GDUT Net` 10 项 + 应用和功能条目就位；dial + 75s 稳定性验证通过。桌面工具包（`C:\Users\Lemonawa\Desktop\gdut-net\`）保留作 fallback，不再日常使用。
+- 个人运维脚本（`switch-v4.ps1`、`rollback.bat`、`rollback-v4.ps1`、`一键切换.bat`、`tun-watch.ps1`）与产品脚本同居安装目录；公开发布 payload 不含它们。
+- `switch-v4.ps1` 不再内嵌明文密码：安装改走 `gdut-net-setup.exe --silent --keep-password`（复用已存 DPAPI 密文重新 `set_credentials`）。
+- `pw.txt` 用后即删；明文密码不落盘。
 
 ### WSL（从 Linux 侧操作这台机器）
 - `powershell.exe` 不在 PATH：WinPS 5.1 = `/mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe`；ps7（应用商店版）= `/mnt/c/Users/Lemonawa/AppData/Local/Microsoft/WindowsApps/pwsh.exe`。
-- 从 WSL 提权常被 UAC 拦（`-Verb RunAs` 静默失败）；改用计划任务或让用户执行。
+- 从 WSL 提权不可靠（历史上 `-Verb RunAs` 被 UAC 静默失败；2026-09-11 本机 `ShellExecuteExW runas` 又实测可直接成功），别赌：改网络/装服务一律走预授权计划任务 `gdut-switch` 或让用户执行。
 - `/mnt/c/ProgramData/**` 等受保护路径对 WSL 只读——改配置走程序自身（`install` 幂等重写 config）或 Windows 管理员侧。
 
 ### 代理 / Verge 排障

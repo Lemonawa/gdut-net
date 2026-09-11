@@ -4,36 +4,51 @@
 [![Release](https://img.shields.io/github/v/release/Lemonawa/gdut-net)](https://github.com/Lemonawa/gdut-net/releases)
 [WTFPL](./LICENSE)
 
-Third-party wired-network auth client for Guangdong University of Technology (Higher Education Mega Center campus): a single Rust binary running as a Windows service that dials and keeps a PPPoE session alive, auto-redials on drops, with an optional Dr.COM heartbeat compat mode. Coexists with Clash TUN / Tailscale (wintun) — all dial and probe traffic is explicitly bound to the physical NIC. When the wired link drops, the service can take over the campus WiFi (eportal web auth) automatically, in exclusive or zero-gap standby mode.
+Third-party wired-network auth client for Guangdong University of Technology (Higher Education Mega Center campus): a Rust program installed as a Windows service that dials and keeps a PPPoE session alive, auto-redials on drops, with an optional Dr.COM heartbeat compat mode. Coexists with Clash TUN / Tailscale (wintun) — all dial and probe traffic is explicitly bound to the physical NIC. When the wired link drops, the service can take over the campus WiFi (eportal web auth) automatically, in exclusive or zero-gap standby mode.
 
-Replaces the official Dr.COM client. No LSP/npf injection.
+Replaces the official Dr.COM client. No LSP/npf injection. The release is a single self-installing `gdut-net-setup.exe` — no terminal required.
 
-## Install (admin PowerShell)
+## Install
 
-```powershell
-# after downloading or building gdut-net.exe:
-.\gdut-net.exe install          # prompts for campus password (or --password-stdin for scripts)
-net start gdut-net
-```
+1. Download `gdut-net-setup.exe` from the [latest release](https://github.com/Lemonawa/gdut-net/releases).
+2. Double-click it. The installer requests administrator rights (accept the UAC prompt).
+3. The Chinese wizard asks for your student ID and campus password, installs to `C:\Program Files\gdut-net\`, creates the Start Menu folder **GDUT Net**, registers the service, starts the tray, and offers to open the daily window.
 
-`install` does:
+The wizard and the CLI share one install core:
 
 1. Verify admin rights (fails fast otherwise)
-2. Prompt for the campus password (DPAPI-encrypted into config, never plaintext on disk); reuses the student ID if a config already exists
+2. Store the campus password (DPAPI-encrypted into config, never plaintext on disk); reuses the student ID if a config already exists
 3. Create the PPPoE phone-book entry `gdut` (`C:\ProgramData\gdut-net\gdut.pbk`)
 4. Register the Windows service `gdut-net` (auto-start; restart on failure 5s/30s/60s, 24h reset)
 5. Register an event-log source (for `log.event_log = true`, mirrors warn/error into Event Viewer)
+6. Create the Start Menu folder (10 entries), the "Apps & Features" uninstall entry, and the per-user tray autostart
 
-Once started, the service dials automatically; drops are redialed with exponential backoff (starts at 1s, caps at 5 min; auth failure 691 fixed at 10 min). If redial keeps failing for ≥10 minutes, a system toast pops.
+Once started, the service dials automatically; drops are redialed with exponential backoff (starts at 1s, caps at 5 min; auth failure 691 fixed at 10 min). If redial keeps failing for ≥10 minutes, a system toast pops. A tray icon starts with your session: **left-click for the Chinese status window, right-click for the native Chinese menu**. Only one tray instance runs; launching again wakes the existing window.
+
+`gdut-net.exe` itself stays portable (copy it anywhere, it runs without network access), but the service is always installed under `C:\Program Files\gdut-net\`.
+
+### Repair / change password
+
+Re-run `C:\Program Files\gdut-net\gdut-net-setup.exe`; the maintenance page keeps the existing DPAPI password by default or takes a new one. Start Menu → **GDUT Net** opens the daily window, which has the same **修改账号密码** entry; `gdut-net-setup.exe --repair` opens the maintenance page directly.
 
 ## Uninstall
 
+Start Menu → **GDUT Net** → **卸载 GDUT Net**, or Settings → Apps → **GDUT Net** → Uninstall. The maintenance page offers two levels:
+
+- **default**: remove the program, service, Start Menu and registry entries; keep configuration and logs
+- **"also delete configuration and logs"**: also remove `C:\ProgramData\gdut-net`
+
+Every step is idempotent — safe to re-run; the purge guard checks the directory name (only deletes a directory literally named `gdut-net`).
+
+### Advanced / script mode (English console output)
+
 ```powershell
-.\gdut-net.exe uninstall            # stops and removes service, event source, entropy key
-.\gdut-net.exe uninstall --purge    # also removes C:\ProgramData\gdut-net (config + logs)
+gdut-net-setup.exe --silent --keep-password      # install/repair, reuse the stored DPAPI blob (no prompt, no plaintext)
+gdut-net-setup.exe --silent --uninstall          # uninstall, keep config and logs
+gdut-net-setup.exe --silent --uninstall --purge  # uninstall and remove C:\ProgramData\gdut-net
 ```
 
-Every step is idempotent — safe to re-run; `--purge` guards the directory name (only deletes a directory literally named `gdut-net`).
+Silent mode prints English and exits non-zero on failure; it is the migration channel used by the author's switch scripts. `--keep-password` requires `--silent` and refuses to run if no stored password exists.
 
 ## Configuration
 
@@ -99,15 +114,27 @@ If the server enforces heartbeat validation, directly-dialed sessions get kicked
 
 If the official client occupies local UDP 61440, compat mode is unavailable and the service logs an error (retries after 60s, never silently).
 
-## CLI / tray
+## CLI (advanced)
+
+The CLI remains fully supported for advanced users; outputs and exit codes are unchanged (English console). In an elevated shell:
 
 ```powershell
-.\gdut-net.exe status    # prints status, uptime, IP, drop reason, redial count, heartbeat
-.\gdut-net.exe tray      # tray icon; menu: status / redial now / details / exit
-.\gdut-net.exe wireless test|off|standby    # one-shot portal check / switch to exclusive / switch to standby
+.\gdut-net.exe install                   # prompts for campus password (or --password-stdin for scripts)
+.\gdut-net.exe install --keep-password   # reuse the stored DPAPI blob, no prompt
+net start gdut-net
+.\gdut-net.exe uninstall                 # stops and removes service, event source, entropy key
+.\gdut-net.exe uninstall --purge         # also removes C:\ProgramData\gdut-net (config + logs)
 ```
 
-Full on-device acceptance checklist (install, TUN coexistence, memory, 72h soak, clean uninstall, wireless takeover): [docs/acceptance.md](docs/acceptance.md).
+CLI installs land in the same layout as the wizard (`C:\Program Files\gdut-net\`, Start Menu, tray autostart).
+
+```powershell
+.\gdut-net.exe status    # any shell: status, uptime, IP, drop reason, redial count, heartbeat
+.\gdut-net.exe tray      # any shell: tray icon; a second launch wakes the running instance instead
+.\gdut-net.exe wireless test|off|standby    # elevated: one-shot portal check / switch mode
+```
+
+Full on-device acceptance checklist (install, TUN coexistence, memory, 72h soak, clean uninstall, wireless takeover, installer/GUI): [docs/acceptance.md](docs/acceptance.md).
 
 ## Development
 
@@ -116,12 +143,31 @@ cargo test                                  # pure-logic unit tests (runs on Lin
 cargo clippy -- -D warnings
 cargo fmt --check
 cargo check --target x86_64-pc-windows-msvc # verify Windows-only code from a Linux dev box
-cargo build --release                       # produces gdut-net.exe (on Windows)
+cargo build --release                       # on Windows: gdut-net.exe, gdut-net-setup.exe, gdut-net-pack.exe
 ```
 
-CI (`.github/workflows/ci.yml`): `linux-test` (test + clippy + fmt), `windows-build` (test + clippy + release build + `gdut-net-x86_64.zip` artifact), triggered on push to main and all PRs. Pushing a tag `v*` runs [.github/workflows/release.yml](.github/workflows/release.yml), which builds and attaches `gdut-net-x86_64.zip` to a GitHub Release automatically.
+The release artifact is a **single file**: `gdut-net-setup.exe` is the setup binary with `gdut-net.exe` and every file in `packaging/payload/` appended. Container format (`src/payload.rs`): `[setup][files][TOC][footer]`; the 24-byte footer carries magic `GDUTPAK1`, a u32 version, the entry count and the TOC offset, and every TOC entry carries name/offset/length/sha256. A truncated or checksum-mismatched payload is a hard error — the installer never performs a partial install. Running the setup unpacked (development) falls back to a `payload/` directory next to the exe.
 
-Architecture and domain vocabulary: [CONTEXT.md](CONTEXT.md); design decisions: [docs/adr/](docs/adr/) (heartbeat variant tradeoff ADR-0002, two-stage drop detection ADR-0003, service/tray split ADR-0001, tray icon choices ADR-0004). Personal deployment kit (one-click home/campus switching, proxy rules): [docs/desktop-kit.md](docs/desktop-kit.md).
+```bash
+# Linux cross-build + pack (needs cargo-xwin and mise):
+mise exec -- cargo xwin build --target x86_64-pc-windows-msvc --release
+cargo build --release --bin gdut-net-pack
+./target/release/gdut-net-pack \
+  --setup target/x86_64-pc-windows-msvc/release/gdut-net-setup.exe \
+  --file target/x86_64-pc-windows-msvc/release/gdut-net.exe \
+  --payload-dir packaging/payload \
+  --out dist/gdut-net-setup.exe
+```
+
+```powershell
+# Windows:
+cargo build --release
+.\target\release\gdut-net-pack.exe --setup target\release\gdut-net-setup.exe --file target\release\gdut-net.exe --payload-dir packaging\payload --out gdut-net-setup.exe
+```
+
+CI (`.github/workflows/ci.yml`): `linux-test` (test + clippy + fmt), `windows-build` (test + clippy + release build + packed `gdut-net-setup.exe` artifact), triggered on push to main and all PRs. Pushing a tag `v*` runs [.github/workflows/release.yml](.github/workflows/release.yml), which builds and attaches `gdut-net-setup.exe` to a GitHub Release automatically.
+
+Architecture and domain vocabulary: [CONTEXT.md](CONTEXT.md); design decisions: [docs/adr/](docs/adr/) (service/tray split ADR-0001, heartbeat variant ADR-0002, two-stage drop detection ADR-0003, tray icon ADR-0004, wireless mode switch ADR-0005, egui panel ADR-0006, installer + daily GUI ADR-0007). Installed desktop operations (Start Menu entries, personal ops scripts, rollback chain): [docs/desktop-kit.md](docs/desktop-kit.md).
 
 ## License
 
