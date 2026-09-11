@@ -221,12 +221,29 @@ fn icon_for(icons: &[tray_icon::Icon], kind: IconKind) -> Option<&tray_icon::Ico
         .and_then(|idx| icons.get(idx))
 }
 
-/// 托盘状态行（菜单首项 + IPC 推送共用）：None = 无快照按掉线展示。
+/// 托盘状态行（菜单首项 + tooltip 共用）：None = 无快照按"服务未运行"。
+///
+/// 中文只覆盖 GUI 呈现（托盘/窗口）；CLI 的英文输出在
+/// `ipc::protocol::StateSnapshot` 的 `*_text()`，协议层不动。
 fn status_line(s: Option<&StateSnapshot>) -> String {
-    match s {
-        None => "Wired: Disconnected".to_string(),
-        Some(s) => format!("Wired: {} · WiFi: {}", s.status_text(), s.wireless_text()),
-    }
+    let Some(s) = s else {
+        return "服务未运行".to_string();
+    };
+    let wired = match s.status {
+        SessionStatus::Connected => "已连接",
+        SessionStatus::Dialing => "拨号中",
+        SessionStatus::Backoff => "重拨中",
+        SessionStatus::AuthFail => "认证失败",
+        SessionStatus::Idle => "空闲",
+    };
+    let wifi = match s.wireless.phase {
+        WPhase::Off => "关闭",
+        WPhase::Joining => "连接中",
+        WPhase::Authing => "认证中",
+        WPhase::Online => "已接管",
+        WPhase::Error => "错误",
+    };
+    format!("有线：{wired} · WiFi：{wifi}")
 }
 
 /// 注册 AUMID（HKCU\Software\Classes\AppUserModelId\gdut-net，默认值
@@ -367,16 +384,16 @@ pub fn run_tray(show_gui_at_start: bool) -> Result<()> {
     let snapshot: SharedSnapshot = Arc::new(Mutex::new(None));
 
     // 菜单在主线程创建；后台线程只经通道送状态文本。
-    let status_item = MenuItem::new("Wired: Disconnected", false, None);
+    // 面孔中文（GUI 场景用户可见）；CLI 输出保持英文。
+    let status_item = MenuItem::new(status_line(None), false, None);
     let sep1 = PredefinedMenuItem::separator();
-    let mode_exclusive =
-        CheckMenuItem::new("Wired only (auto wireless takeover)", true, true, None);
-    let mode_standby = CheckMenuItem::new("Wired + wireless standby", true, false, None);
+    let mode_exclusive = CheckMenuItem::new("有线优先（自动无线接管）", true, true, None);
+    let mode_standby = CheckMenuItem::new("有线 + 无线备用", true, false, None);
     let sep2 = PredefinedMenuItem::separator();
-    let redial_item = MenuItem::new("Redial now", true, None);
-    let panel_item = MenuItem::new("Details", true, None);
+    let redial_item = MenuItem::new("立即重拨", true, None);
+    let panel_item = MenuItem::new("打开主界面", true, None);
     let sep3 = PredefinedMenuItem::separator();
-    let quit_item = MenuItem::new("Exit", true, None);
+    let quit_item = MenuItem::new("退出托盘", true, None);
 
     let menu = Menu::new();
     menu.append_items(&[
@@ -404,7 +421,7 @@ pub fn run_tray(show_gui_at_start: bool) -> Result<()> {
     // win32 消息循环），主线程天然满足。`tray` 必须保活：drop 会移除托盘
     // 图标。
     let tray = tray_icon::TrayIconBuilder::new()
-        .with_tooltip("gdut-net — Wired: Disconnected / WiFi: Off")
+        .with_tooltip(format!("gdut-net — {}", status_line(None)))
         .with_icon(
             icon_for(&icons, IconKind::Down)
                 .cloned()
@@ -416,6 +433,7 @@ pub fn run_tray(show_gui_at_start: bool) -> Result<()> {
         .build()
         .map_err(|e| anyhow!("Failed to create tray icon: {e}"))?;
     let mut last_kind = IconKind::Down;
+    let mut last_tooltip = status_line(None);
 
     // IPC 线程 → 泵线程：状态文本；面板点击重拨也汇聚到泵线程统一发，
     // 避免两处并发建 PipeClient。
@@ -497,11 +515,11 @@ pub fn run_tray(show_gui_at_start: bool) -> Result<()> {
             status_item.set_text(text);
         }
         // 快照缓存兜底刷新（文本通道丢消息时也能收敛）：状态行、模式勾选、
-        // 图标/tooltip 变更才 set（幂等，且避免每拍 syscall 抖动）。
+        // tooltip、图标，都是变了才 set（幂等，且避免每拍 syscall 抖动）。
         if let Ok(guard) = snapshot.lock() {
             let want_status = status_line(guard.as_ref());
             if status_item.text() != want_status {
-                status_item.set_text(want_status);
+                status_item.set_text(&want_status);
             }
             let mode = guard.as_ref().map_or_else(NetMode::default, |s| s.mode);
             mode_exclusive.set_checked(mode == NetMode::WiredExclusive);
@@ -513,16 +531,14 @@ pub fn run_tray(show_gui_at_start: bool) -> Result<()> {
                         log::warn!("Failed to update tray icon: {e}");
                     }
                 }
-                let tooltip = match guard.as_ref() {
-                    None => "gdut-net — service not running".to_string(),
-                    Some(s) => format!(
-                        "gdut-net — Wired: {} / WiFi: {}",
-                        s.status_text(),
-                        s.wireless_text()
-                    ),
-                };
-                tray.set_tooltip(Some(tooltip)).ok();
                 last_kind = kind;
+            }
+            // tooltip 与菜单首行用同一句话；状态文本变了就更新（图标可能没变，
+            // 例如 退避重拨 → 认证失败 同属 Backoff 灯）。
+            if last_tooltip != want_status {
+                tray.set_tooltip(Some(format!("gdut-net — {want_status}")))
+                    .ok();
+                last_tooltip = want_status;
             }
         }
     }
