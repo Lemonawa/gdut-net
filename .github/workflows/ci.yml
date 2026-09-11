@@ -32,10 +32,10 @@ jobs:
       - run: cargo test --release
       - run: cargo clippy --all-targets -- -D warnings
       - run: cargo build --release
-      - run: Compress-Archive -Path target/release/gdut-net.exe -DestinationPath gdut-net-x86_64.zip
+      - run: ./target/release/gdut-net-pack.exe --setup target/release/gdut-net-setup.exe --file target/release/gdut-net.exe --payload-dir packaging/payload --out gdut-net-setup.exe
         shell: pwsh
       - uses: actions/upload-artifact@v7
         with:
-          name: gdut-net-x86_64
-          path: gdut-net-x86_64.zip
+          name: gdut-net-setup
+          path: gdut-net-setup.exe
           if-no-files-found: error
