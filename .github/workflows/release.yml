@@ -22,7 +22,7 @@ jobs:
       - run: cargo build --release
       - run: ./target/release/gdut-net-pack.exe --setup target/release/gdut-net-setup.exe --file target/release/gdut-net.exe --payload-dir packaging/payload --out gdut-net-setup.exe
         shell: pwsh
-      - uses: softprops/action-gh-release@v2
+      - uses: softprops/action-gh-release@v3
         with:
           files: gdut-net-setup.exe
           generate_release_notes: true
