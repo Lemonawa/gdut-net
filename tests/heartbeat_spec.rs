@@ -6,8 +6,8 @@ fn ka1_pkt1_layout() {
 }
 
 #[test]
-fn parse_ka1_resp_issue82_capture() {
-    // issue #82 真实抓包（file packet 形态）
+fn parse_ka1_resp_file_packet() {
+    // file packet 形态样本
     let pkt = [
         0x07u8, 0x6f, 0x10, 0x00, 0x02, 0x03, 0x00, 0x00, 0xa3, 0xe2, 0xf3, 0x00, 0x0a, 0x1e, 0x84,
         0xa7, 0xa8, 0xa8, 0x00, 0x00, 0xe6, 0x59, 0xf1, 0x67, 0x00, 0x00, 0x00, 0x00, 0xdc, 0x02,
@@ -19,8 +19,8 @@ fn parse_ka1_resp_issue82_capture() {
 }
 
 #[test]
-fn ka1_pkt2_checksum_sha1_mode_issue82() {
-    // seed=a3e2f300 → 0xa3&3=3 → SHA1；抓包校验值 9ae9cef84b020aa3
+fn ka1_pkt2_checksum_sha1_mode() {
+    // seed=a3e2f300 → 0xa3&3=3 → SHA1；参考校验值 9ae9cef84b020aa3
     let pkt = ka1_pkt2(
         1,
         true,

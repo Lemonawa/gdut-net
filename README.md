@@ -57,7 +57,7 @@ Silent mode prints English and exits non-zero on failure; it is the migration ch
 
 ```toml
 # HEMC (Higher Education Mega Center) auth server 10.0.3.2; Longdong / Dongfeng Road use 10.0.3.6
-# Heartbeat is disabled by default; capture packets before enabling (see docs/adr/0002)
+# Heartbeat is disabled by default; verify on site before enabling (see docs/adr/0002)
 
 [account]
 student_id = "your student id"
@@ -111,7 +111,7 @@ event_log = false                        # mirror warn/error to Windows event lo
 
 If the server enforces heartbeat validation, directly-dialed sessions get kicked periodically; enable `heartbeat.enabled = true` (sends Dr.COM keepalives, UDP 61440, one round every 20s).
 
-**Risk note**: the heartbeat constants (server IP, flags, seed checksum) are decades old, and the GDUT variant differs from the drcom-generic P build — **capture packets on campus before enabling** (Wireshark filter `udp.port == 61440`, compare against the official client), see [ADR-0002](docs/adr/0002-heartbeat-gdut-variant.md).
+**Risk note**: the heartbeat constants (server IP, flags, seed checksum) are legacy values and may no longer match the live server — **verify on campus before enabling** (UDP 61440), see [ADR-0002](docs/adr/0002-heartbeat-gdut-variant.md).
 
 If the official client occupies local UDP 61440, compat mode is unavailable and the service logs an error (retries after 60s, never silently).
 
@@ -172,4 +172,4 @@ Architecture and domain vocabulary: [CONTEXT.md](CONTEXT.md); design decisions: 
 
 ## License
 
-[WTFPL](./LICENSE). For study only; contains no official client code — Dr.COM protocol details come from community reverse-engineering.
+[WTFPL](./LICENSE). For study only; contains no official client code.

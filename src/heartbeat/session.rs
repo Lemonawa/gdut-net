@@ -142,8 +142,8 @@ pub fn run_blocking(
             let _ = status_tx.send(HeartbeatStatus::Error(msg.clone()));
             return Err(msg);
         }
-        //（首个心跳 first=true；后续轮次在本简化实现中同样用 true——上游
-        // drcom-generic 对 keepalive 每轮独立握手均标记 first，见 ADR-0002。）
+        //（首个心跳 first=true；后续轮次在本简化实现中同样用 true——
+        // 每轮 keepalive 独立握手均标记 first，见 ADR-0002。）
 
         // ---- KA2：密钥交换 + 确认 ----
         if !sleep_interruptible(KA1_TO_KA2_DELAY, &stop) {

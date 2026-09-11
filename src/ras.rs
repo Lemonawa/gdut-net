@@ -95,9 +95,9 @@ mod win {
 
     /// 幂等创建/更新宽带拨号条目：PPPoE + WAN Miniport (PPPoE)。
     ///
-    /// `dwfNetProtocols` 必须含 `RASNP_Ip`（对齐官方客户端条目 ExcludedProtocols=8 的反推值 7：
-    /// NetBEUI+Ipx+Ip）。default() 的 0 会让 RAS 排除 IP 协议族，PPPoE IPCP 无法协商 → 错误 720。
-    /// `dwEncryptionType=ET_Require` 对应官方 pbk 的 DataEncryption=8（要求加密密码）。
+    /// `dwfNetProtocols` 必须含 `RASNP_Ip`（本机验证可用取值 7：NetBEUI+Ipx+Ip）。
+    /// default() 的 0 会让 RAS 排除 IP 协议族，PPPoE IPCP 无法协商 → 错误 720。
+    /// `dwEncryptionType=ET_Require` 要求加密密码。
     pub fn ensure_entry(pbk: &str, name: &str) -> Result<()> {
         let entry = RASENTRYW {
             dwSize: size_of::<RASENTRYW>() as u32,

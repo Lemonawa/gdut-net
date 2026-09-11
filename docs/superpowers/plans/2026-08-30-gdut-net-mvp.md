@@ -292,7 +292,7 @@ fn reject_short_probe_interval() {
 
 - [ ] **Step 2: 确认失败** — Run: `cargo test --test config`；Expected: 编译失败。
 
-- [ ] **Step 3: 实现 config.rs**：结构如上 Interfaces；实现要点：`load` 读文件→`toml::from_str`→`validate`；`save` 建父目录后 `toml::to_string_pretty`；`sample()` 前置注释两行（`# 大学城认证服务器 10.0.3.2；龙洞/东风路为 10.0.3.6`、`# 心跳默认关闭；开启前必须抓包验证（见 ADR-0002）`）+ 序列化默认 Config（`student_id: "你的学号"`，`password_blob: ""`）。
+- [ ] **Step 3: 实现 config.rs**：结构如上 Interfaces；实现要点：`load` 读文件→`toml::from_str`→`validate`；`save` 建父目录后 `toml::to_string_pretty`；`sample()` 前置注释两行（`# 大学城认证服务器 10.0.3.2；龙洞/东风路为 10.0.3.6`、`# 心跳默认关闭；开启前必须实测验证（见 ADR-0002）`）+ 序列化默认 Config（`student_id: "你的学号"`，`password_blob: ""`）。
 
 - [ ] **Step 4: 确认通过** — Run: `cargo test`；Expected: config 3 passed + backoff 2 passed。
 
@@ -302,7 +302,7 @@ fn reject_short_probe_interval() {
 
 ### Task 4: heartbeat/spec.rs（Dr.COM GDUT 报文，纯）
 
-> 协议来源 ADR-0002（gdut-drcom auth.c 与 drcom-generic issue #82 抓包交叉验证）。纯字节操作，无 IO。
+> 协议规格：ADR-0002。纯字节操作，无 IO。
 
 **Files:**
 - Create: `src/heartbeat/mod.rs`（`pub mod spec;`）、`src/heartbeat/spec.rs`、`tests/heartbeat_spec.rs`；Modify: `src/lib.rs`
@@ -332,8 +332,8 @@ fn ka1_pkt1_layout() {
 }
 
 #[test]
-fn parse_ka1_resp_issue82_capture() {
-    // issue #82 真实抓包（file packet 形态）
+fn parse_ka1_resp_file_packet() {
+    // file packet 形态样本
     let pkt = [
         0x07u8, 0x6f, 0x10, 0x00, 0x02, 0x03, 0x00, 0x00, 0xa3, 0xe2, 0xf3, 0x00, 0x0a, 0x1e,
         0x84, 0xa7, 0xa8, 0xa8, 0x00, 0x00, 0xe6, 0x59, 0xf1, 0x67, 0x00, 0x00, 0x00, 0x00,
@@ -346,8 +346,8 @@ fn parse_ka1_resp_issue82_capture() {
 }
 
 #[test]
-fn ka1_pkt2_checksum_sha1_mode_issue82() {
-    // seed=a3e2f300 → 0xa3&3=3 → SHA1；抓包校验值 9ae9cef84b020aa3
+fn ka1_pkt2_checksum_sha1_mode() {
+    // seed=a3e2f300 → 0xa3&3=3 → SHA1；参考校验值 9ae9cef84b020aa3
     let pkt = ka1_pkt2(1, true, [0x0a, 0x1e, 0x84, 0xa7], [0xa3, 0xe2, 0xf3, 0x00], [0x2a, 0x00]);
     assert_eq!(&pkt[0..5], &[0x07, 1, 0x60, 0x00, 0x03]);
     assert_eq!(&pkt[17..18], &[0x62]);
@@ -409,7 +409,7 @@ fn cnt_wraps_below_128() {
 
 - [ ] **Step 3: 实现 spec.rs**（按 Interfaces 逐函数实现；`crypt_bytes`/`plain_bytes`/`md5_bytes`/`md4_bytes`/`sha1_bytes` 设为 `pub` 供测试；哈希用 `md5::Md5`、`md4::Md4`、`sha1::Sha1` 的 `Digest::digest`，取 `d[i]` 按下标挑字节。`ka2_checksum` 用 `u16::from_le_bytes` 逐步 XOR，`(sum & 0xffff).wrapping_mul(0x2c7).to_le_bytes()`。）
 
-- [ ] **Step 4: 确认通过** — Run: `cargo test --test heartbeat_spec`；Expected: 8 passed。若 `ka1_pkt2_checksum_sha1_mode_issue82` 失败：先写独立脚本对 `[0xa3,0xe2,0xf3,0x00]` 算 SHA1 挑下标核对 `9ae9cef84b020aa3`；若下标有误**以抓包值为准**调整下标并在代码注释记录。
+- [ ] **Step 4: 确认通过** — Run: `cargo test --test heartbeat_spec`；Expected: 8 passed。若 `ka1_pkt2_checksum_sha1_mode` 失败：先写独立脚本对 `[0xa3,0xe2,0xf3,0x00]` 算 SHA1 挑下标核对 `9ae9cef84b020aa3`；若下标有误**以样本参考值为准**调整下标并在代码注释记录。
 
 - [ ] **Step 5: Commit** — `git add -A && git -c commit.gpgsign=false commit -m "feat: Dr.COM GDUT 心跳报文规格与测试向量"`
 
@@ -926,5 +926,5 @@ sc.exe query gdut-net           # 期望 1060（服务不存在）
 | 1. 全新 Win11 安装→自动拨号→断网自动重连 | 11（install）+ 12（runtime）+ 9（watchdog） |
 | 2. TUN/Tailscale 共存，重启后重拨成功 | 6（物理适配器绑定）+ 12 |
 | 3. 内存 <50MB / 24h 无泄漏 | release profile opt-level=z + 状态机无累积分配 |
-| 4. 72h 不掉线（默认关心跳）；心跳抓包验证 | 8（两级探测减少误重拨）+ 4/12（心跳，抓包真机验证） |
+| 4. 72h 不掉线（默认关心跳）；心跳现场验证 | 8（两级探测减少误重拨）+ 4/12（心跳，真机验证） |
 | 5. 卸载干净 | 11（uninstall --purge） |

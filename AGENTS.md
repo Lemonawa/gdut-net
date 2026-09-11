@@ -19,7 +19,7 @@
 - **掉线判定**（ADR-0003）：以流量探测为准，不单看 `RASCS_Connected`；两级网关 ICMP→HTTP 复核，连续 2 次失败才判掉线。
 - **不做**：不扫描虚拟网卡、不装 LSP/驱动/WinPcap、不做限速绕过（无线网页认证由 wireless 模块承担，ADR-0005）。
 - **密码**：`config.toml` 的 `password_blob = GDUT1:<hex>:<base64>` 为 DPAPI 机器级密文；含明文密码的 portal URL 永不落日志（打码只留 host+path）。
-- **心跳**：默认 `heartbeat.enabled=false`；GDUT 变体从抓包规格洁净室实现，**禁止逐行翻译** `drcom-generic`(AGPL)/`gdut-drcom`(GPL)（ADR-0002）。
+- **心跳**：默认 `heartbeat.enabled=false`；GDUT 变体按 ADR-0002 的协议规格独立实现。
 - **重拨**：指数退避 `1s→300s` 封顶，稳定 `300s` 重置；`691` 认证失败固定 `600s`（`backoff::AUTH_FAIL_DELAY`）。
 - **日志**：`flexi_logger` 按大小滚动 `5MB×5`；`log.event_log=true` 时 warn/error 镜像 Windows 事件日志。
 - **防乱码（语言策略，ADR-0007）**：**控制台输出必须英文**（CLI/日志/脚本/`.bat`/.ps1 回显）——中文 Windows 控制台 GBK 会乱码；**GUI 必须中文**（安装器向导/维护页、日常窗口、托盘菜单、`说明.txt`）——GUI 经系统字体渲染无乱码问题，面向学生用户。源码注释中英文皆可。

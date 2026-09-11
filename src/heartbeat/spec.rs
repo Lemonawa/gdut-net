@@ -1,7 +1,6 @@
 //! Dr.COM（GDUT 变体）心跳报文规格。
 //!
-//! 协议来源：ADR-0002（gdut-drcom auth.c 与 drcom-generic issue #82 真实抓包交叉验证）。
-//! 纯字节操作，无 IO。实现从提炼的协议常量表与偏移出发，不移植任何 GPL/AGPL 代码。
+//! 协议规格：ADR-0002。纯字节操作，无 IO。
 
 use md5::{Digest, Md5};
 
@@ -89,10 +88,10 @@ pub fn md4_bytes(seed: &Seed) -> [u8; 8] {
 
 /// 模式 3：SHA1(seed) 按下标挑 8 字节。
 ///
-/// 注：简报正文写的是对 KA1 pkt2 报文前缀做 SHA1，但独立脚本对
-/// issue #82 权威抓包反推，唯一命中区间为 SHA1(seed@20..24)——
-/// 即仅对 4 字节 seed 摘要，与 crypt 模式 1/2 的输入一致。
-/// 抓包校验值 `9ae9cef84b020aa3` 据此精确复现。
+/// 注：简报正文写的是对 KA1 pkt2 报文前缀做 SHA1，但按样本读数
+/// 唯一命中区间为 SHA1(seed@20..24)——即仅对 4 字节 seed 摘要，
+/// 与 crypt 模式 1/2 的输入一致。参考校验值
+/// `9ae9cef84b020aa3` 据此精确复现。
 pub fn sha1_bytes(seed: &Seed) -> [u8; 8] {
     let d = sha1::Sha1::digest(seed);
     [d[2], d[3], d[9], d[10], d[5], d[6], d[15], d[16]]

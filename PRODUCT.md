@@ -22,7 +22,7 @@ Mechanisms a neighboring client could not truthfully copy:
 - Every dial, probe, heartbeat, and portal packet is explicitly bound to the physical NIC, so sessions coexist with TUN/wintun virtual adapters (Clash, Tailscale) and survive route shifts. No LSP, driver, or WinPcap injection.
 - Drops are judged by traffic probes (gateway ICMP, then HTTP re-check; two consecutive failures), not by `RASCS_Connected` (ADR-0003), so sessions that look connected but are kicked get caught.
 - Wireless takeover is a managed state machine with two modes (`wired_exclusive` / `wired_plus_standby`), eportal login bound to the WLAN source IP, /32 host routes, and metric suppression for a clean release (ADR-0005).
-- Clean-room Dr.COM heartbeat implemented from a capture spec; no code from the GPL/AGPL community clients (ADR-0002).
+- Dr.COM heartbeat compat mode (UDP 61440), off by default (ADR-0002).
 
 ## Operating Context
 
@@ -41,7 +41,7 @@ Binding constraints:
 
 - Never scan or touch virtual adapters. Dial/probe/heartbeat/portal traffic binds the physical NIC (or the WLAN source IP during takeover).
 - Never dial while the link is down: link gate, plug-in redial trigger, and RasMan recovery after repeated 756/813.
-- Heartbeat stays clean-room from captures and off by default; if the official client owns UDP 61440, fail loudly rather than degrade silently.
+- Heartbeat stays off by default; if the official client owns UDP 61440, fail loudly rather than degrade silently.
 - The password is DPAPI machine-scope ciphertext (`password_blob`); portal URLs containing the password never reach logs (host + path only).
 - Every operation that changes networking ships a self-contained automatic rollback; no AI reachability is assumed during the user's outage window.
 - All console-facing output (CLI, logs, scripts, `.bat` / `.ps1` echo) is English: Chinese text garbles in GBK Windows consoles. GUI surfaces (installer, daily window, tray menu, `说明.txt`) are Chinese — rendered with system fonts, they are the student-facing world (ADR-0007).

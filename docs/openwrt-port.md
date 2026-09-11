@@ -6,8 +6,8 @@
 
 | 方案 | 性质 | 对本项目的可用性 |
 |---|---|---|
-| `xnhw01/gdut-drcom-for-openwrt` | GDUT 大学城 5.2.1p 变体，C 实现，OpenWrt ipk + procd，含 PPPoE 拨号选项 | **最强先例**：2017-10~2018-07 真实可用，证明"路由器 PPPoE + gdut 心跳变体"成立。停更 8 年，仅作行为对照基准（GPL，不引用代码，遵守 ADR-0002 洁净室约束） |
-| `drcoms/drcom-generic`、`mchome/dogcom` | P/d/x 版通用实现（Python/C） | 不适用：P 版心跳依赖登录 salt，无登录态守护进程走不通（ADR-0002 已否决） |
+| OpenWrt 社区实现 | GDUT 大学城 5.2.1p 变体，C 实现，ipk + procd，含 PPPoE 拨号选项 | **最强先例**：2017-10~2018-07 真实可用，证明"路由器 PPPoE + GDUT 心跳变体"成立。停更多年，仅作行为对照基准 |
+| P/d/x 版通用资料 | 公开协议整理与既有实现 | 不适用：P 版心跳依赖登录 salt，无登录态守护进程走不通（ADR-0002 已否决） |
 | 各 HTTP portal 登录脚本（HUTB 等） | "哆点"网页认证 | 与 GDUT 有线 PPPoE 无关 |
 
 ## 第 0 步：选型门槛（买之前）
@@ -41,7 +41,7 @@ Windows 上那套"双出口隔离 + TUN 绑 `gdut`"的坑在路由器上**不存
 - 不跑任何心跳，观察会话存活：几小时？几天？一直？
 - 对策分岔：
   - **一直不掉 → 结案**，世上再无 Dr.COM，路由器就是全部答案；
-  - **周期性被踢 → 进第 3 步**，同时顺手在校园网内抓一次官方客户端流量，复核 ADR-0002 警告的常量（大学城服务器 `10.0.3.2`、`keep_alive1_flag` 抓包 `2a` 与 Dialer `6a` 矛盾）。
+  - **周期性被踢 → 进第 3 步**，同时顺手在校园网内实测复核 ADR-0002 警告的常量（大学城服务器 `10.0.3.2`、`keep_alive1_flag` 2a/6a 两说并存）。
 
 ## 第 3 步：心跳 PoC（仅当被踢证实后才做）
 
@@ -50,14 +50,14 @@ Windows 上那套"双出口隔离 + TUN 绑 `gdut`"的坑在路由器上**不存
 - `heartbeat::spec`：纯逻辑（md5/md4/sha1），`tests/heartbeat_spec.rs` 在 Linux CI 全绿，**零改动**。
 - `heartbeat::session::run_blocking`：std `UdpSocket` + tokio watch/CancellationToken，无 `#[cfg(windows)]` 门，**今天就能在 Linux 编译**（doc comment 写的 "Windows-only" 是过时描述）。bind `(src_ip, 61440)` 失败即报错的规则自包含在内。
 - 唯一移植点：`runtime.rs:246` 的 `adapter::physical_adapter()`（Windows GAA）换成读 OpenWrt 上 `pppoe-wan` 的 IPv4（`ifstatus wan` / rtnetlink / uci get 皆可）。
-- 外壳：procd init 脚本 + `hotplug` 在 `ifup` 时拉起/在 `ifdown` 时停；参考 gdut-drcom-for-openwrt 的 procd 集成形态（仅对照行为，不抄代码）。
+- 外壳：procd init 脚本 + `hotplug` 在 `ifup` 时拉起/在 `ifdown` 时停；procd 集成形态可参照既有社区先例。
 - 交叉编译：`cargo build --release --target <arch>-unknown-linux-musl`（OpenWrt 用 musl，我们零系统依赖，静态直塞）。
 
 ## 风险与对策
 
 | 风险 | 评估 | 对策 |
 |---|---|---|
-| 服务器 2018→2026 变了（心跳协议改/加校验） | 未知，唯一解法实测 | 第 2 步观察期 + 校园网抓包复核常量 |
+| 服务器 2018→2026 变了（心跳协议改/加校验） | 未知，唯一解法实测 | 第 2 步观察期 + 校园网实测复核常量 |
 | 多设备检测升级为 TTL/深度检测 | 低：HTTPS 已加密，UA 检测只对明文 HTTP 有效；NAT 后 TTL 不统一可能露馅 | 若被识别：`iptables -t mangle` 统一出站 TTL；或全屋流量走路由器自身统一出口 |
 | 学号绑定了旧网卡 MAC | 可能首次拨号 691 | 校园网自助系统解绑/换绑（拿 Windows 侧 691 处理经验套用） |
 | 宿舍口 MAC 数量限制 | PPPoE 只需线路通，一般无碍 | 实测 |
