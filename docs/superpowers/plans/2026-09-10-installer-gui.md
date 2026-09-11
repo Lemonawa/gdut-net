@@ -2640,6 +2640,8 @@ git commit -m "feat(gui): Chinese daily-driver window + tray menu (locked direct
 
 - [ ] **Step 3: Personal scripts.** `switch-v4.ps1` is rewritten as migration-aware v5 (runs elevated via the existing `gdut-switch` task, so no UAC on this machine):
 
+> **Ruling R8 (pre-migration, real-machine parse test):** the plan's original `\"`-escaped lines in `switch-v4.ps1` are invalid PowerShell (ParserError → whole script never runs). Committed fix (84f07e9): task repoint via `New-ScheduledTaskAction` + `Set-ScheduledTask` with `schtasks /Query` verification; `RollbackToDesktop` restores by copying the Desktop exe over the installed one (no binPath mutation — the field-proven desktop-kit pattern); silent setup output captured via `& $setup ... 2>&1 | Out-String` + `$LASTEXITCODE` (the wireless-test.bat pattern). The plan snippet below is superseded by `packaging/personal/switch-v4.ps1` as committed.
+
 ```powershell
 # gdut-net switch v5 -- migrate Desktop kit into Program Files + full switch.
 # Runs elevated via the pre-authorized scheduled task gdut-switch.
