@@ -6,7 +6,7 @@
 ## 架构
 
 - **lib+bin**：`src/lib.rs` 暴露全部模块；三个 bin：`gdut-net`（`src/main.rs` → `cli::dispatch()`）、`gdut-net-setup`（`src/bin/gdut-net-setup.rs` → `setup::entry()`，Windows 安装/维护 GUI，非 Windows 编译为明确报错）、`gdut-net-pack`（host 打包工具，把 payload 追加到 setup 尾部）。新增模块需在 `lib.rs` 注册。
-- **平台分层**：纯逻辑（`backoff`/`config`/`heartbeat::spec`/`ipc::protocol`/`watchdog`/`probe` 判定函数/`wireless` 的 Brain 与 portal 纯半/`payload`/`packaging`/`setup_args`/`shell_shortcuts`）无 `windows::` 依赖，Linux 可跑 TDD；Win32 胶水（`ras`/`adapter`/`service`/`runtime`/`eventlog`/`notify`/`tray`（`mod.rs` 托盘本体 + `gui.rs` 日常窗口）/`shell.rs`（开始菜单/卸载键）/`setup::{ui,work}`/`wireless::{routes,wlan,test}`）仅 `cfg(windows)`，靠交叉编译验证。
+- **平台分层**：纯逻辑（`backoff`/`cmdline`/`config`/`heartbeat::spec`/`ipc::protocol`/`watchdog`/`probe` 判定函数/`wireless` 的 Brain 与 portal 纯半/`payload`/`packaging`/`setup_args`/`shell_shortcuts`）无 `windows::` 依赖，Linux 可跑 TDD；Win32 胶水（`ras`/`adapter`/`service`/`runtime`/`eventlog`/`notify`/`tray`（`mod.rs` 托盘本体 + `gui.rs` 日常窗口）/`shell.rs`（开始菜单/卸载键）/`setup::{ui,work}`/`wireless::{routes,wlan,test}`）仅 `cfg(windows)`，靠交叉编译验证。
 - **运行拓扑**（ADR-0001）：服务 `SYSTEM`（Session 0，无 UI）+ 托盘用户会话进程，命名管道 `\\.\pipe\gdut-net` JSON-line 通信。服务内三个 actor：watchdog（拨号/探测）、heartbeat（可选）、wireless manager（无线接管），快照经 IPC 广播。
 - **状态机节奏**：runtime 主循环只在"绝对唤醒时刻到点/显式命令"时跑 `run_once`，无线快照等事件唤醒只推快照——否则退避 sleep 被 2s 切碎（见 CONTEXT.md 陷阱）。
 - **发布形态**：单文件 `gdut-net-setup.exe` = setup 本体 + 载荷容器（`src/payload.rs`：`[setup][files][TOC][24B footer]`，magic `GDUTPAK1`，逐项 sha256；截断/坏包拒绝安装）。`gdut-net-pack`（`src/packaging.rs`）打包；开发态未打包的 setup 回退读自身旁边 `payload/` 目录；`packaging/payload/` 是公开发布文件清单（`shell_shortcuts` 一致性测试冻结），`packaging/personal/` 与 `packaging/dev/` 不进发布物。主程序 `gdut-net.exe` 保持 portable（不联网、不下载、不更新）。

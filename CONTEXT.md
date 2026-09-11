@@ -137,7 +137,7 @@ setup 文件尾部追加 `[files][TOC][footer]` 的自定义容器：footer 24B�
 - setup 载荷容器：`[setup][files][TOC][24B footer]`，magic `GDUTPAK1`；从文件尾读 footer，逐项 sha256 校验。开发态（未打包）回退读自身旁边 `payload/` 目录；发布物被截断/篡改 = 明确报错拒绝安装。
 - 安装目录删除要延迟重试（`schedule_install_dir_removal`，cmd 循环 90×1s + `CREATE_NO_WINDOW|DETACHED_PROCESS`）：setup 窗口/开始菜单快捷方式会占用目录；`.arg()` 会把引号转义成 `\"` 而 cmd 不认——必须 `raw_arg` 原样传。
 - 开始菜单快捷方式工作目录 = 安装目录；管理员项（campus/home/无线体检/卸载）带 `SLDF_RUNAS_USER`（盾牌）。
-- egui 默认字体无 CJK 字形：GUI 必须加载系统字体（`msyh.ttc`，回退 `simhei.ttf`/`simsun.ttc`），找不到报错页而不是静默方块（ADR-0006 同源教训）。
+- egui 默认字体无 CJK 字形：GUI 必须加载系统字体（以 `src/fonts.rs` 的候选顺序为准：`Deng.ttf` → `simhei.ttf` → `msyh.ttc` → `simsun.ttc`），找不到报错页而不是静默方块（ADR-0006 同源教训）。
 
 ### 脚本 / 部署（Windows 侧）
 - `*>&1 | Out-File` 会把英文 `WARN` 当 `NativeCommandError`；GUI 子系统 exe（setup/tray）直接重定向丢输出——`switch-v4.ps1` 用 `& $setup --silent --keep-password 2>&1 | Out-String` + `$LASTEXITCODE` 捕获。

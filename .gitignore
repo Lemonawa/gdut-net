@@ -1,3 +1,4 @@
 /target
+/dist
 .worktrees/
 *:Zone.Identifier

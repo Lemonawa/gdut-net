@@ -44,7 +44,9 @@ fn run_install(args: &SetupArgs) -> Result<()> {
                         eprintln!("Rolled back to the previous service.");
                     }
                     work::RollbackOutcome::RestoredUnknown => {
-                        eprintln!("Service existed but its path was unreadable; left untouched.");
+                        eprintln!(
+                            "Service existed but its path was unreadable; registration untouched, service restarted."
+                        );
                     }
                     // 回滚失败详情可能含中文（核心/GUI 文案）：英文标签 + 原文，不翻译。
                     work::RollbackOutcome::Failed(r) => eprintln!("ROLLBACK FAILED: {r}"),

@@ -85,7 +85,7 @@ pub enum RollbackOutcome {
     NotNeeded,
     /// 旧服务注册已恢复（或本次新建的服务已删除）；旧服务已尽力启动。
     Restored,
-    /// 服务原本存在但路径读不出：未做任何改动（绝不删除）。
+    /// 服务原本存在但路径读不出：注册未改动（绝不删除），已尽力重新启动服务。
     RestoredUnknown,
     /// 回滚动作失败（含恢复注册后启动失败）。
     Failed(String),
@@ -259,7 +259,7 @@ enum PrevService {
     None,
     /// 有服务且路径已知：失败时恢复注册并尽力启动。
     Known(PathBuf),
-    /// 有服务但路径读不出：失败时不碰注册，也绝不删除。
+    /// 有服务但路径读不出：失败时不碰注册，也绝不删除；尽力重新启动服务。
     Unknown,
 }
 
@@ -277,12 +277,22 @@ fn capture_prev_service() -> PrevService {
 }
 
 /// 失败回滚：恢复旧服务注册（或删除新建服务），并回报回滚实情。
-/// 服务原本存在但路径未知时不做任何动作——宁可不回滚，也不误删。
+/// 服务原本存在但路径未知时不动注册（宁可不回滚，也不误删），但尽力把停掉的服务拉起来。
 fn rollback_for(prev: &PrevService) -> RollbackOutcome {
     match prev {
         PrevService::Unknown => {
-            log::warn!("Service existed but its path could not be read; not touching it");
-            RollbackOutcome::RestoredUnknown
+            log::warn!(
+                "Service existed but its path could not be read; registration left untouched"
+            );
+            match service::start_service() {
+                Ok(()) => RollbackOutcome::RestoredUnknown,
+                Err(e) => {
+                    log::error!(
+                        "Rollback left registration untouched but service start failed: {e:#}"
+                    );
+                    RollbackOutcome::Failed(format!("服务注册未改动，但启动失败：{e:#}"))
+                }
+            }
         }
         PrevService::None => match service::delete_service() {
             Ok(()) => RollbackOutcome::Restored,

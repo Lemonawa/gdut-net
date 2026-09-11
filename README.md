@@ -12,7 +12,7 @@ Replaces the official Dr.COM client. No LSP/npf injection. The release is a sing
 
 1. Download `gdut-net-setup.exe` from the [latest release](https://github.com/Lemonawa/gdut-net/releases).
 2. Double-click it. The installer requests administrator rights (accept the UAC prompt).
-3. The Chinese wizard asks for your student ID and campus password, installs to `C:\Program Files\gdut-net\`, creates the Start Menu folder **GDUT Net**, registers the service, starts the tray, and offers to open the daily window.
+3. The Chinese wizard asks for your student ID and campus password, installs to `C:\Program Files\gdut-net\`, creates the Start Menu folder **GDUT Net** and the Apps & Features entry, registers the service and the per-user tray autostart, and offers an **打开 GDUT Net** button to launch the daily window (it does not start the tray process itself).
 
 The wizard and the CLI share one install core:
 
@@ -21,11 +21,12 @@ The wizard and the CLI share one install core:
 3. Create the PPPoE phone-book entry `gdut` (`C:\ProgramData\gdut-net\gdut.pbk`)
 4. Register the Windows service `gdut-net` (auto-start; restart on failure 5s/30s/60s, 24h reset)
 5. Register an event-log source (for `log.event_log = true`, mirrors warn/error into Event Viewer)
-6. Create the Start Menu folder (10 entries), the "Apps & Features" uninstall entry, and the per-user tray autostart
+6. Register the per-user tray autostart
+7. *(wizard only)* Create the Start Menu folder (10 entries) and the "Apps & Features" uninstall entry
 
 Once started, the service dials automatically; drops are redialed with exponential backoff (starts at 1s, caps at 5 min; auth failure 691 fixed at 10 min). If redial keeps failing for ≥10 minutes, a system toast pops. A tray icon starts with your session: **left-click for the Chinese status window, right-click for the native Chinese menu**. Only one tray instance runs; launching again wakes the existing window.
 
-`gdut-net.exe` itself stays portable (copy it anywhere, it runs without network access), but the service is always installed under `C:\Program Files\gdut-net\`.
+`gdut-net.exe` itself stays portable (copy it anywhere, it runs without network access), but `gdut-net-setup.exe` installs the program and the service under `C:\Program Files\gdut-net\`.
 
 ### Repair / change password
 
@@ -40,7 +41,7 @@ Start Menu → **GDUT Net** → **卸载 GDUT Net**, or Settings → Apps → **
 
 Every step is idempotent — safe to re-run; the purge guard checks the directory name (only deletes a directory literally named `gdut-net`).
 
-### Advanced / script mode (English console output)
+## Advanced / script mode (English console output)
 
 ```powershell
 gdut-net-setup.exe --silent --keep-password      # install/repair, reuse the stored DPAPI blob (no prompt, no plaintext)
@@ -126,7 +127,7 @@ net start gdut-net
 .\gdut-net.exe uninstall --purge         # also removes C:\ProgramData\gdut-net (config + logs)
 ```
 
-CLI installs land in the same layout as the wizard (`C:\Program Files\gdut-net\`, Start Menu, tray autostart).
+CLI installs keep the exe where it was invoked and register the service plus the per-user tray autostart; the `C:\Program Files\gdut-net\` layout, Start Menu folder and "Apps & Features" entry come from `gdut-net-setup.exe`.
 
 ```powershell
 .\gdut-net.exe status    # any shell: status, uptime, IP, drop reason, redial count, heartbeat

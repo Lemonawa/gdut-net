@@ -442,7 +442,7 @@ impl SetupApp {
                             Some(work::RollbackOutcome::RestoredUnknown) => {
                                 ui.colored_label(
                                     VERMILION,
-                                    "服务原本已存在，但无法读取其路径，未做任何改动。请查看日志或手动修复。",
+                                    "服务原本存在但路径读不到：未改动服务注册，已重新启动服务。请查看日志或手动修复。",
                                 );
                             }
                             Some(work::RollbackOutcome::Failed(rb)) => {
