@@ -18,15 +18,15 @@ use super::{install_dir, work, SetupArgs};
 // ---- 校园卡配色（自绘色板；egui 默认主题只作控件底色）----
 
 /// 卡蓝：卡面与主按钮。
-const CARD_BLUE: egui::Color32 = egui::Color32::from_rgb(0x1B, 0x4F, 0x9C);
+const CARD_BLUE: egui::Color32 = egui::Color32::from_rgb(0x1D, 0x4E, 0x9E);
 /// 票纸白：小票底色。
-const PAPER_WHITE: egui::Color32 = egui::Color32::from_rgb(0xFB, 0xFA, 0xF5);
+const PAPER_WHITE: egui::Color32 = egui::Color32::from_rgb(0xF4, 0xF1, 0xE8);
 /// 墨黑：正文与虚线。
-const INK_BLACK: egui::Color32 = egui::Color32::from_rgb(0x1F, 0x23, 0x28);
+const INK_BLACK: egui::Color32 = egui::Color32::from_rgb(0x1A, 0x1A, 0x1A);
 /// 读卡绿：完成标记。
-const READER_GREEN: egui::Color32 = egui::Color32::from_rgb(0x2E, 0x9E, 0x5B);
+const READER_GREEN: egui::Color32 = egui::Color32::from_rgb(0x2F, 0x9E, 0x63);
 /// 朱红：错误。
-const VERMILION: egui::Color32 = egui::Color32::from_rgb(0xC0, 0x39, 0x2B);
+const VERMILION: egui::Color32 = egui::Color32::from_rgb(0xC2, 0x40, 0x2F);
 
 pub fn run(args: SetupArgs) -> Result<()> {
     // GUI 安装器无 stderr（windows 子系统）：写 ProgramData 文件日志。
@@ -256,7 +256,13 @@ impl eframe::App for SetupApp {
             ui.ctx()
                 .request_repaint_after(std::time::Duration::from_millis(80));
         }
-        egui::CentralPanel::default().show(ui, |ui| {
+        egui::CentralPanel::default()
+            .frame(
+                egui::Frame::new()
+                    .fill(PAPER_WHITE)
+                    .inner_margin(egui::Margin::same(16)),
+            )
+            .show(ui, |ui| {
             if !self.font_ok {
                 // 字体缺失时连这条消息都无法用中文渲染（默认字体无 CJK），故用英文，保证不是豆腐块。
                 ui.colored_label(
@@ -486,30 +492,38 @@ impl SetupApp {
     }
 
     fn maintenance_page(&mut self, ui: &mut egui::Ui) {
-        match &self.state {
-            InstallState::Installed {
-                service_exe,
-                version,
-            } => {
-                ui.label("GDUT Net 已安装在这台电脑上。");
-                ui.add_space(6.0);
-                let location = match service_exe {
-                    Some(exe) => exe
-                        .parent()
-                        .map(|p| p.display().to_string())
-                        .unwrap_or_else(|| exe.display().to_string()),
-                    None => "（无法读取服务路径）".to_string(),
-                };
-                ui.label(format!("安装位置：{location}"));
-                ui.label(format!(
-                    "版本：{}",
-                    version.as_deref().unwrap_or(env!("CARGO_PKG_VERSION"))
-                ));
-            }
-            InstallState::NotInstalled => {
-                ui.label("GDUT Net 尚未安装。修复安装会重新解包文件并注册服务。");
-            }
-        }
+        let installed = matches!(&self.state, InstallState::Installed { .. });
+        ui.horizontal_top(|ui| {
+            self.card_preview(ui, if installed { "已装卡" } else { "未装卡" });
+            ui.add_space(16.0);
+            ui.vertical(|ui| {
+                ui.set_width(280.0);
+                match &self.state {
+                    InstallState::Installed {
+                        service_exe,
+                        version,
+                    } => {
+                        ui.label("GDUT Net 已安装在这台电脑上。");
+                        ui.add_space(6.0);
+                        let location = match service_exe {
+                            Some(exe) => exe
+                                .parent()
+                                .map(|p| p.display().to_string())
+                                .unwrap_or_else(|| exe.display().to_string()),
+                            None => "（无法读取服务路径）".to_string(),
+                        };
+                        ui.label(format!("安装位置：{location}"));
+                        ui.label(format!(
+                            "版本：{}",
+                            version.as_deref().unwrap_or(env!("CARGO_PKG_VERSION"))
+                        ));
+                    }
+                    InstallState::NotInstalled => {
+                        ui.label("GDUT Net 尚未安装。修复安装会重新解包文件并注册服务。");
+                    }
+                }
+            });
+        });
         ui.add_space(12.0);
         ui.horizontal(|ui| {
             if ui.button("修复安装").clicked() {
