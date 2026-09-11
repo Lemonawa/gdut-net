@@ -1,0 +1,137 @@
+{
+  "schemaVersion": 2,
+  "generatedAt": "2026-09-11T14:05:00+08:00",
+  "title": "Design System: GDUT Net",
+  "extensions": {
+    "colorMeta": {
+      "card-blue": {
+        "role": "primary",
+        "displayName": "卡蓝 Card Blue",
+        "canonical": "#1D4E9E",
+        "tonalRamp": ["#0E2750", "#14336A", "#1A4084", "#1D4E9E", "#2E6BB8", "#5C90CF", "#9CB9E2", "#DCE7F4"]
+      },
+      "card-blue-hover": { "role": "primary", "displayName": "卡蓝悬停", "canonical": "#3D66A9" },
+      "card-blue-pressed": { "role": "primary", "displayName": "卡蓝按下", "canonical": "#1C3E76" },
+      "card-dim": {
+        "role": "neutral",
+        "displayName": "卡面暗字 Card Dim",
+        "canonical": "#BEC8D6",
+        "tonalRamp": ["#4A515B", "#68707D", "#8B93A0", "#BEC8D6", "#CFD7E1", "#DFE5EC", "#EFF2F6", "#F8FAFC"]
+      },
+      "paper-white": {
+        "role": "neutral",
+        "displayName": "票纸白 Paper White",
+        "canonical": "#F4F1E8",
+        "tonalRamp": ["#6E6A5C", "#8F8B7C", "#B0AC9C", "#D2CEBF", "#F4F1E8", "#F7F5EE", "#FAF9F4", "#FDFCFA"]
+      },
+      "ink-black": {
+        "role": "neutral",
+        "displayName": "墨黑 Ink Black",
+        "canonical": "#1A1A1A",
+        "tonalRamp": ["#0A0A0A", "#1A1A1A", "#3A3A3A", "#5B5B5B", "#7C7C7C", "#A0A0A0", "#C7C7C7", "#ECECEC"]
+      },
+      "ink-secondary": { "role": "neutral", "displayName": "次级墨", "canonical": "#5B5B58" },
+      "ink-rule": { "role": "neutral", "displayName": "虚线墨", "canonical": "#8B8A85" },
+      "reader-green": {
+        "role": "secondary",
+        "displayName": "读卡绿 Reader Green",
+        "canonical": "#2F9E63",
+        "tonalRamp": ["#123D26", "#1B5C39", "#247C4C", "#2F9E63", "#4FBA7F", "#7ED0A2", "#AEDFC6", "#DDEFE6"]
+      },
+      "vermilion": {
+        "role": "secondary",
+        "displayName": "朱红 Vermilion",
+        "canonical": "#C2402F",
+        "tonalRamp": ["#4B1912", "#73261C", "#9A3325", "#C2402F", "#D66A5B", "#E39489", "#EFBFB8", "#F8E3E0"]
+      },
+      "soft-hover": {
+        "role": "neutral",
+        "displayName": "软键悬停",
+        "canonical": "#DADDDF",
+        "tonalRamp": ["#6D6F70", "#8A8C8D", "#A6A8AA", "#C3C4C6", "#DADDDF", "#E6E8E9", "#F0F1F2", "#F8F9F9"]
+      },
+      "soft-pressed": { "role": "neutral", "displayName": "软键按下", "canonical": "#C5CDD8" }
+    },
+    "typographyMeta": {
+      "display": { "displayName": "小票大字", "purpose": "日常窗口的页级状态读数（28px）。" },
+      "card-number": { "displayName": "卡号", "purpose": "卡面学号，等宽、四位一组（24px）。" },
+      "body": { "displayName": "字段行", "purpose": "小票字段、事件流水、说明（13px）。" },
+      "label": { "displayName": "字段名", "purpose": "字段名与卡面小标（11–12px）。" }
+    },
+    "shadows": [],
+    "motion": [
+      { "name": "stamp-repress", "value": "request_repaint on status change", "purpose": "状态变化时重盖印章。" }
+    ],
+    "breakpoints": []
+  },
+  "components": [
+    {
+      "name": "Card Face 卡面",
+      "kind": "card",
+      "refersTo": "card-face",
+      "description": "一卡通的卡面：卡蓝底、白字卡号、状态章。",
+      "html": "<div class=\"ds-card-face\"><div class=\"ds-card-face__title\">GDUT Net 上网卡</div><div class=\"ds-card-face__id\">3126 0064 14</div><div class=\"ds-card-face__stamp\">已连接</div></div>",
+      "css": ".ds-card-face { background: #1D4E9E; color: #F4F1E8; border-radius: 8px; padding: 12px; width: 168px; height: 96px; font-family: 'Microsoft YaHei', sans-serif; } .ds-card-face__title { font-size: 15px; font-weight: 600; } .ds-card-face__id { font-family: Consolas, 'Courier New', monospace; font-size: 24px; letter-spacing: 0.08em; margin-top: 10px; } .ds-card-face__stamp { background: #C2402F; color: #F4F1E8; display: inline-block; padding: 3px 11px; transform: rotate(-3deg); font-size: 13px; }"
+    },
+    {
+      "name": "Soft Key 软键",
+      "kind": "button",
+      "refersTo": "soft-key",
+      "description": "圈存机软键：票纸白底、墨字，悬停/按下只改填充。",
+      "html": "<button class=\"ds-soft-key\">打开日志目录</button>",
+      "css": ".ds-soft-key { background: #F4F1E8; color: #1A1A1A; border: 1px solid #8B8A85; border-radius: 0; padding: 6px 12px; font-size: 13px; font-family: 'Microsoft YaHei', sans-serif; cursor: pointer; } .ds-soft-key:hover { background: #DADDDF; } .ds-soft-key:active { background: #C5CDD8; } .ds-soft-key:focus-visible { outline: 2px solid #1D4E9E; outline-offset: 1px; }"
+    },
+    {
+      "name": "Primary Action 主操作",
+      "kind": "button",
+      "refersTo": "primary-action",
+      "description": "主操作以卡蓝填充白字：立即重拨 / 开始安装 / 修复安装 / 启动服务。",
+      "html": "<button class=\"ds-btn-primary\">立即重拨</button>",
+      "css": ".ds-btn-primary { background: #1D4E9E; color: #F4F1E8; border: none; border-radius: 0; padding: 6px 16px; font-size: 13px; font-family: 'Microsoft YaHei', sans-serif; cursor: pointer; } .ds-btn-primary:hover { background: #3D66A9; } .ds-btn-primary:active { background: #1C3E76; } .ds-btn-primary:focus-visible { outline: 2px solid #1A1A1A; outline-offset: 1px; }"
+    },
+    {
+      "name": "Status Stamp 状态章",
+      "kind": "custom",
+      "refersTo": "status-stamp",
+      "description": "状态变化时重盖的印章：实心色块 + 内线 + 轻微倾斜。",
+      "html": "<span class=\"ds-stamp ds-stamp--fail\">认证失败</span>",
+      "css": ".ds-stamp { display: inline-block; padding: 3px 11px; transform: rotate(-3deg); font-size: 13px; font-family: 'Microsoft YaHei', sans-serif; box-shadow: inset 0 0 0 1px rgba(244,241,232,0.8); } .ds-stamp--fail { background: #C2402F; color: #F4F1E8; } .ds-stamp--ok { background: #2F9E63; color: #F4F1E8; }"
+    },
+    {
+      "name": "Receipt Row 小票行",
+      "kind": "custom",
+      "refersTo": "soft-key",
+      "description": "小票字段行：字段名次级墨，值墨黑/等宽；分节用短横虚线。",
+      "html": "<div class=\"ds-receipt-row\"><span class=\"ds-receipt-row__k\">本机 IP</span><span class=\"ds-receipt-row__v\">10.30.12.34</span></div>",
+      "css": ".ds-receipt-row { display: flex; justify-content: space-between; gap: 16px; padding: 2px 0; font-family: 'Microsoft YaHei', sans-serif; } .ds-receipt-row__k { color: #5B5B58; font-size: 13px; } .ds-receipt-row__v { color: #1A1A1A; font-size: 13px; font-family: Consolas, 'Courier New', monospace; }"
+    }
+  ],
+  "narrative": {
+    "northStar": "校园一卡通 / 圈存机",
+    "overview": "GDUT Net 的两个界面（安装器 = 发卡柜台，日常窗口 = 一卡通卡片与圈存小票）共用同一个世界：网络资格是一张卡，安装是发卡，状态像读卡灯一样只有四种，每一步都印在小票上。界面是纸与塑料的平面印刷物——卡蓝的卡面、票纸白的收据、等宽数字、虚线分隔、印章色块。",
+    "keyCharacteristics": [
+      "平面印刷，无渐变、无阴影堆砌；层次只靠色块与虚线",
+      "状态像读卡灯：已连接 / 重拨中 / 认证失败 / 无线接管 / 服务未运行",
+      "数字一律等宽：学号、IP、时长、版本",
+      "动效克制：状态变化时卡面重盖一枚章"
+    ],
+    "rules": [
+      { "name": "The Reader-Light Rule", "body": "绿与朱红是状态灯，不是装饰色。", "section": "colors" },
+      { "name": "The Paper Rule", "body": "页面底永远是票纸白 #F4F1E8；卡蓝只出现在卡面与主操作上。", "section": "colors" },
+      { "name": "The Monospace-Number Rule", "body": "一切数字用等宽；比例字只用于中文与标点。", "section": "typography" }
+    ],
+    "dos": [
+      "Do 页面底用票纸白 #F4F1E8，卡蓝 #1D4E9E 只给卡面与主操作。",
+      "Do 数字一律等宽（学号、IP、时长、版本）。",
+      "Do 用四种读卡灯语义表达状态；页级停机用朱红大字 + 启动服务软键。",
+      "Do 保持窗口尺寸固定（460×540 / 520×460）与软键排位置固定。"
+    ],
+    "donts": [
+      "Don't 使用渐变、阴影、浮雕或任何材质模拟。",
+      "Don't 把读卡绿 / 朱红用成装饰色。",
+      "Don't 在日常窗口展示密码、明文 portal URL 或任何截图。",
+      "Don't 引入另一套色板或字体；两个界面必须同色同字。",
+      "Don't 添加图标字体或图形图标。"
+    ]
+  }
+}
