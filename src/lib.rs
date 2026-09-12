@@ -29,6 +29,7 @@ pub mod setup_args;
 pub mod shell;
 pub mod shell_shortcuts;
 pub mod status;
+pub mod supervisor;
 #[cfg(windows)]
 pub mod tray;
 pub mod watchdog;

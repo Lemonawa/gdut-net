@@ -72,6 +72,15 @@ pub struct WatchdogCfg {
     pub auth_fail_delay: Duration,
 }
 
+/// 组合层组装 `StateSnapshot` 所需的有线会话事实（占位字段的替代）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionView {
+    pub status: SessionStatus,
+    pub since_unix: Option<u64>,
+    pub last_drop_reason: Option<String>,
+    pub redial_attempts: u32,
+}
+
 pub struct Watchdog {
     dialer: Box<dyn Dialer>,
     prober: Box<dyn Prober>,
@@ -124,15 +133,26 @@ impl Watchdog {
         self.eth_link
     }
 
-    pub fn snapshot(&self) -> StateSnapshot {
-        StateSnapshot {
+    /// 有线会话事实（组合层快照的单源；`snapshot()` 暂留到壳切换完成）。
+    pub fn view(&self) -> SessionView {
+        SessionView {
             status: self.phase.into(),
             since_unix: self
                 .since
                 .map(|t| t.duration_since(UNIX_EPOCH).unwrap_or_default().as_secs()),
-            ip: None,
             last_drop_reason: self.last_drop_reason.clone(),
             redial_attempts: self.attempts,
+        }
+    }
+
+    pub fn snapshot(&self) -> StateSnapshot {
+        let v = self.view();
+        StateSnapshot {
+            status: v.status,
+            since_unix: v.since_unix,
+            ip: None,
+            last_drop_reason: v.last_drop_reason,
+            redial_attempts: v.redial_attempts,
             heartbeat: HeartbeatStatus::Off,
             mode: NetMode::default(),
             wireless: WirelessSnapshot::default(),

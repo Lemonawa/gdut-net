@@ -216,3 +216,31 @@ async fn request_redial_without_flag_keeps_probing() {
     wd.run_once().await; // 正常探测，不再拨号
     assert_eq!(wd.dial_calls(), 1);
 }
+
+#[tokio::test]
+async fn view_matches_snapshot_wired_fields() {
+    let d = MockDialer {
+        fail_times: 1,
+        ..Default::default()
+    };
+    let mut wd = Watchdog::new(d, MockProber(vec![ProbeVerdict::Alive]), cfg());
+    wd.set_eth_link(Some(true));
+    wd.run_once().await; // 失败 → Backoff（last_drop_reason 非空）
+
+    let view = wd.view();
+    let snap = wd.snapshot();
+    assert_eq!(view.status, snap.status);
+    assert_eq!(view.since_unix, snap.since_unix);
+    assert_eq!(view.last_drop_reason, snap.last_drop_reason);
+    assert_eq!(view.redial_attempts, snap.redial_attempts);
+
+    // 成功会话：since_unix 也一致。
+    wd.run_once().await;
+    let view = wd.view();
+    let snap = wd.snapshot();
+    assert_eq!(view.status, SessionStatus::Connected);
+    assert_eq!(view.since_unix, snap.since_unix);
+    assert!(view.since_unix.is_some());
+    assert_eq!(view.last_drop_reason, snap.last_drop_reason);
+    assert_eq!(view.redial_attempts, snap.redial_attempts);
+}
