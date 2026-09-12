@@ -13,7 +13,7 @@ use eframe::egui::{self, ViewportBuilder};
 use crate::service::InstallState;
 use crate::setup_args::Mode;
 
-use super::{install_dir, work, SetupArgs};
+use super::{work, SetupArgs};
 
 // ---- 校园卡配色（自绘色板；egui 默认主题只作控件底色）----
 
@@ -837,7 +837,7 @@ impl SetupApp {
     /// 就起托盘 + 弹 GUI，托盘已在跑就唤出它的窗口；setup 是管理员进程，
     /// 直接 spawn 会把托盘提权启动（违背会话进程设计）。
     fn open_tray(&self) {
-        let exe = install_dir().join("gdut-net.exe");
+        let exe = crate::paths::install_exe();
         if let Err(e) = std::process::Command::new("explorer").arg(&exe).spawn() {
             log::warn!("Failed to open tray: {e}");
         }

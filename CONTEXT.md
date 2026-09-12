@@ -133,7 +133,7 @@ setup 文件尾部追加 `[files][TOC][footer]` 的自定义容器：footer 24B�
 
 ### 安装器 / GUI 陷阱
 - setup 与托盘都是 **GUI 子系统（`windows_subsystem`），没有 stdout/stderr**：silent 模式输出必须经 PowerShell 管道捕获（`& $setup --silent --keep-password 2>&1 | Out-String` + `$LASTEXITCODE`；裸 cmd 重定向会丢输出——`wireless-test.bat` 同一模式）。GUI 模式启动失败走原生 `MessageBoxW` 弹窗，否则窗口一闪而逝。
-- 文件日志：托盘 `tray_r*.log`、setup `setup_r*.log`（滚 5MB×2），都在 `C:\ProgramData\gdut-net\logs\`；服务日志仍是 `gdut-net_r*.log`。GUI 进程崩溃只记日志，不影响服务。
+- 文件日志：托盘 `tray_r*.log`、setup `setup_r*.log`（滚 5MB×5），都在 `C:\ProgramData\gdut-net\logs\`；服务日志仍是 `gdut-net_r*.log`。GUI 进程崩溃只记日志，不影响服务。
 - setup 载荷容器：`[setup][files][TOC][24B footer]`，magic `GDUTPAK1`；从文件尾读 footer，逐项 sha256 校验。开发态（未打包）回退读自身旁边 `payload/` 目录；发布物被截断/篡改 = 明确报错拒绝安装。
 - 安装目录删除要延迟重试（`schedule_install_dir_removal`，cmd 循环 90×1s + `CREATE_NO_WINDOW|DETACHED_PROCESS`）：setup 窗口/开始菜单快捷方式会占用目录；`.arg()` 会把引号转义成 `\"` 而 cmd 不认——必须 `raw_arg` 原样传。
 - 开始菜单快捷方式工作目录 = 安装目录；管理员项（campus/home/无线体检/卸载）带 `SLDF_RUNAS_USER`（盾牌）。

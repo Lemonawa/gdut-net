@@ -192,7 +192,7 @@ fn run_install(tx: Sender<Ev>, args: SetupArgs, student_id: String, password: Op
                 .with_context(|| format!("Failed to write {}", dest.display()))?;
         }
         let self_exe = std::env::current_exe()?;
-        let setup_dest = dir.join("gdut-net-setup.exe");
+        let setup_dest = crate::paths::setup_exe();
         // 从安装目录内运行（修复场景）：正在运行的文件不能覆盖，跳过自我拷贝。
         let same_file = match (
             std::fs::canonicalize(&self_exe),
@@ -216,8 +216,8 @@ fn run_install(tx: Sender<Ev>, args: SetupArgs, student_id: String, password: Op
             cfg_path: config_path(),
             student_id: Some(student_id),
             credential,
-            service_exe: dir.join("gdut-net.exe"),
-            tray_exe: dir.join("gdut-net.exe"),
+            service_exe: crate::paths::install_exe(),
+            tray_exe: crate::paths::install_exe(),
         })?;
         step_done(&tx, STEP_INSTALL_CORE, "写入配置并注册服务");
 

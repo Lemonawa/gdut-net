@@ -327,7 +327,7 @@ impl eframe::App for Gui {
 // ---- 状态呈现（章 / 灯 / 大字，一处定义）----
 
 /// 一屏的状态呈现：章上的字与墨色、读卡灯、票面大字颜色、出口。
-struct StatusView {
+struct StampView {
     word: &'static str,
     stamp_fill: egui::Color32,
     stamp_ink: egui::Color32,
@@ -338,7 +338,7 @@ struct StatusView {
 }
 
 /// 状态 → 呈现。词与出口的判定在 `crate::status`，本函数只做色板映射。
-fn status_view(s: Option<&StateSnapshot>) -> StatusView {
+fn status_view(s: Option<&StateSnapshot>) -> StampView {
     let v = crate::status::view(s);
     let (stamp_fill, stamp_ink, word_color, light) = match v.primary {
         Primary::ServiceDown => (VERMILION, PAPER_WHITE, VERMILION, None),
@@ -353,7 +353,7 @@ fn status_view(s: Option<&StateSnapshot>) -> StatusView {
         // 空闲：空白章（纸面 + 墨字），像一张未启用的卡。
         Primary::Idle => (PAPER_WHITE, INK_BLACK, INK_BLACK, None),
     };
-    StatusView {
+    StampView {
         word: v.primary.word_zh(),
         stamp_fill,
         stamp_ink,
@@ -366,7 +366,7 @@ fn status_view(s: Option<&StateSnapshot>) -> StatusView {
 // ---- 顶部卡面 ----
 
 /// 卡面：卡蓝地、读卡灯、学号如卡号、状态章。
-fn card_face(ui: &mut egui::Ui, view: &StatusView, student_id: Option<&str>, stamp_t: f32) {
+fn card_face(ui: &mut egui::Ui, view: &StampView, student_id: Option<&str>, stamp_t: f32) {
     egui::Frame::new()
         .fill(CARD_BLUE)
         .inner_margin(egui::Margin::symmetric(18, 12))
@@ -428,7 +428,7 @@ fn reader_light(ui: &mut egui::Ui, light: Option<egui::Color32>) {
 }
 
 /// 状态章：色块 + 内衬细线 + 章字，轻微歪斜像手盖的；状态变化时淡入压印。
-fn status_stamp(ui: &mut egui::Ui, view: &StatusView, t: f32) {
+fn status_stamp(ui: &mut egui::Ui, view: &StampView, t: f32) {
     let alpha = 0.35 + 0.65 * t;
     let grow = 1.0 + 0.06 * (1.0 - t);
     let galley = ui.painter().layout_no_wrap(
@@ -487,7 +487,7 @@ fn status_stamp(ui: &mut egui::Ui, view: &StatusView, t: f32) {
 fn receipt(
     ui: &mut egui::Ui,
     s: &StateSnapshot,
-    view: &StatusView,
+    view: &StampView,
     redial_tx: &Sender<()>,
     setmode_tx: &Sender<NetMode>,
     body_h: f32,
@@ -561,7 +561,7 @@ fn receipt(
 }
 
 /// 大字状态 + 出口（出口未知时如实写 —）。
-fn status_row(ui: &mut egui::Ui, view: &StatusView) {
+fn status_row(ui: &mut egui::Ui, view: &StampView) {
     ui.horizontal(|ui| {
         ui.label(
             egui::RichText::new(view.word)
@@ -629,7 +629,7 @@ fn wireless_zh(s: &StateSnapshot) -> String {
 }
 
 /// 服务未运行页：大字状态 + 说明 + 启动服务（主按钮）。
-fn service_down(ui: &mut egui::Ui, view: &StatusView) {
+fn service_down(ui: &mut egui::Ui, view: &StampView) {
     ui.spacing_mut().item_spacing.y = 2.0;
     let frame = egui::Frame::new().inner_margin(egui::Margin::symmetric(18, 0));
     frame.show(ui, |ui| {
@@ -798,7 +798,7 @@ fn grouped_id(id: &str) -> String {
 
 /// 改密码 / 启动服务：拉起安装目录的 setup（它自提权，弹一次 UAC）。
 fn launch_setup(args: &[&str]) {
-    let exe = crate::setup::install_dir().join("gdut-net-setup.exe");
+    let exe = crate::paths::setup_exe();
     match std::process::Command::new(&exe).args(args).spawn() {
         Ok(_) => log::info!("Launched setup {args:?}"),
         Err(e) => log::error!("Failed to launch setup {}: {e}", exe.display()),

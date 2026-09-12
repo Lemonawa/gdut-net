@@ -48,7 +48,7 @@ fn first_interface(handle: HANDLE) -> Result<windows::core::GUID> {
 fn wlanapi_connect(profile: &str) -> Result<()> {
     with_handle(|h| {
         let guid = first_interface(h)?;
-        let mut profile_w: Vec<u16> = profile.encode_utf16().chain(std::iter::once(0)).collect();
+        let mut profile_w = crate::win32::wide(profile);
         let params = WLAN_CONNECTION_PARAMETERS {
             wlanConnectionMode: wlan_connection_mode_profile,
             strProfile: PCWSTR(profile_w.as_mut_ptr()),

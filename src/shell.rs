@@ -173,16 +173,13 @@ fn write_uninstall_key(install_dir: &Path, version: &str) -> Result<()> {
         HKEY_LOCAL_MACHINE,
         UNINSTALL_SUBKEY,
         Some("DisplayIcon"),
-        &install_dir.join("gdut-net.exe").to_string_lossy(),
+        &crate::paths::install_exe().to_string_lossy(),
     )?;
     reg::set_string(
         HKEY_LOCAL_MACHINE,
         UNINSTALL_SUBKEY,
         Some("UninstallString"),
-        &format!(
-            "\"{}\" --uninstall",
-            install_dir.join("gdut-net-setup.exe").display()
-        ),
+        &format!("\"{}\" --uninstall", crate::paths::setup_exe().display()),
     )?;
     reg::set_string(
         HKEY_LOCAL_MACHINE,
@@ -190,7 +187,7 @@ fn write_uninstall_key(install_dir: &Path, version: &str) -> Result<()> {
         Some("QuietUninstallString"),
         &format!(
             "\"{}\" --silent --uninstall",
-            install_dir.join("gdut-net-setup.exe").display()
+            crate::paths::setup_exe().display()
         ),
     )?;
     for name in ["NoModify", "NoRepair"] {
