@@ -14,19 +14,14 @@ pub use crate::setup_args::{Mode, SetupArgs};
 // 定义在 shell.rs（shell 不反向依赖 setup，避免模块环）；此处 re-export 供 UI/工作流使用。
 pub use crate::shell::START_MENU_FOLDER;
 
-pub const DATA_DIR: &str = r"C:\ProgramData\gdut-net";
-
 /// 配置文件路径：%ProgramData%\gdut-net\config.toml。
 pub fn config_path() -> PathBuf {
-    PathBuf::from(DATA_DIR).join("config.toml")
+    PathBuf::from(crate::paths::CONFIG_PATH)
 }
 
 /// 安装目录：%ProgramFiles%\gdut-net。
 pub fn install_dir() -> PathBuf {
-    let base = std::env::var_os("ProgramFiles")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(r"C:\Program Files"));
-    base.join("gdut-net")
+    crate::paths::install_dir()
 }
 
 pub fn is_admin() -> bool {

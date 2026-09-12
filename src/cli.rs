@@ -14,7 +14,7 @@ pub struct Cli {
     #[arg(
         long,
         global = true,
-        default_value = r"C:\ProgramData\gdut-net\config.toml"
+        default_value = crate::paths::CONFIG_PATH
     )]
     pub config: std::path::PathBuf,
 

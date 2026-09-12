@@ -21,6 +21,10 @@ use flexi_logger::{Cleanup, Criterion, FileSpec, Logger, LoggerHandle, Naming};
 
 use crate::config::LogCfg;
 
+/// 文件日志策略（GUI 进程与服务一致；AGENTS/CONTEXT 文档口径）。
+pub const LOG_MAX_SIZE_MB: u64 = 5;
+pub const LOG_KEEP_FILES: usize = 5;
+
 /// CLI 辅助命令：info 级直接 stderr（flexi_logger 默认彩色格式）。
 ///
 /// flexi_logger 文档：`log_to_stderr` 场景下立即丢弃 LoggerHandle 是安全的
@@ -41,9 +45,9 @@ pub fn init_tray_logging(log_dir: &str, basename: &str) -> Option<LoggerHandle> 
             .log_to_file(FileSpec::default().directory(log_dir).basename(basename))
             .append()
             .rotate(
-                Criterion::Size(5 * 1024 * 1024),
+                Criterion::Size(rotation_bytes(LOG_MAX_SIZE_MB)),
                 Naming::Timestamps,
-                Cleanup::KeepLogFiles(2),
+                Cleanup::KeepLogFiles(LOG_KEEP_FILES),
             )
             .start()
     });

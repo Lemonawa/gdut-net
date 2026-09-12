@@ -85,7 +85,7 @@ impl Default for Dial {
     fn default() -> Self {
         Self {
             entry_name: "gdut".into(),
-            pbk_path: r"C:\ProgramData\gdut-net\gdut.pbk".into(),
+            pbk_path: crate::paths::PBK_PATH.into(),
             interface: String::new(),
             probe_interval_secs: 30,
             http_probe_url: "http://223.5.5.5".into(),
@@ -108,9 +108,9 @@ impl Default for HeartbeatCfg {
 impl Default for LogCfg {
     fn default() -> Self {
         Self {
-            dir: r"C:\ProgramData\gdut-net\logs".into(),
-            max_size_mb: 5,
-            rotate_keep: 5,
+            dir: crate::paths::LOGS_DIR.into(),
+            max_size_mb: crate::logging::LOG_MAX_SIZE_MB,
+            rotate_keep: crate::logging::LOG_KEEP_FILES as u32,
             event_log: false,
         }
     }

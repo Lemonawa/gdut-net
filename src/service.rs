@@ -467,7 +467,7 @@ mod win {
             .position(|a| a == "--config")
             .and_then(|i| std::env::args().nth(i + 1))
             .map(PathBuf::from)
-            .unwrap_or_else(|| PathBuf::from(r"C:\ProgramData\gdut-net\config.toml"));
+            .unwrap_or_else(|| PathBuf::from(crate::paths::CONFIG_PATH));
         // logger 此刻尚未安装，log::error! 会静默 no-op：失败必须先
         // eprintln! 兜底，再报 Stopped 退出，给 SCM 与用户留诊断。
         let cfg = match Config::load(&cfg_path) {
@@ -683,12 +683,12 @@ mod win {
         }
     }
 
-    /// ProgramData 根：配置路径的上级目录（缺省 C:\ProgramData\gdut-net）。
+    /// ProgramData 根：配置路径的上级目录（缺省 `crate::paths::DATA_DIR`）。
     fn program_data_dir(cfg_path: &Path) -> PathBuf {
         cfg_path
             .parent()
             .map(|p| p.to_path_buf())
-            .unwrap_or_else(|| PathBuf::from(r"C:\ProgramData\gdut-net"))
+            .unwrap_or_else(|| PathBuf::from(crate::paths::DATA_DIR))
     }
 }
 

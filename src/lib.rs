@@ -13,6 +13,7 @@ pub mod logging;
 #[cfg(windows)]
 pub mod notify;
 pub mod packaging;
+pub mod paths;
 pub mod payload;
 pub mod probe;
 pub mod ras;

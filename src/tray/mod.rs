@@ -338,7 +338,7 @@ pub fn unregister_autostart() -> Result<()> {
 pub fn run_tray(show_gui_at_start: bool) -> Result<()> {
     // 先装文件日志（托盘无 stderr），单实例守卫的 warn 也得有落点；
     // 句柄活到进程退出（泵循环内不 drop），Secondary 分支安装后即退出，无害。
-    let _logger = crate::logging::init_tray_logging(r"C:\ProgramData\gdut-net\logs", "tray");
+    let _logger = crate::logging::init_tray_logging(crate::paths::LOGS_DIR, "tray");
     let _singleton = match acquire_singleton() {
         Singleton::Primary(h) => h,
         Singleton::Secondary => {

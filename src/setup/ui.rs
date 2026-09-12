@@ -31,7 +31,7 @@ const VERMILION: egui::Color32 = egui::Color32::from_rgb(0xC2, 0x40, 0x2F);
 pub fn run(args: SetupArgs) -> Result<()> {
     // GUI 安装器无 stderr（windows 子系统）：写 ProgramData 文件日志。
     // 句柄活到 run_native 返回（GUI 全程）；进程随后退出，符合进程生命周期。
-    let _logger = crate::logging::init_tray_logging(r"C:\ProgramData\gdut-net\logs", "setup");
+    let _logger = crate::logging::init_tray_logging(crate::paths::LOGS_DIR, "setup");
     let state = crate::service::install_state();
     let options = eframe::NativeOptions {
         viewport: ViewportBuilder::default()
@@ -845,7 +845,7 @@ impl SetupApp {
 
     /// 打开日志目录（资源管理器）。
     fn open_logs(&self) {
-        let dir = PathBuf::from(super::DATA_DIR).join("logs");
+        let dir = PathBuf::from(crate::paths::LOGS_DIR);
         if let Err(e) = std::process::Command::new("explorer").arg(&dir).spawn() {
             log::warn!("Failed to open log dir {}: {e}", dir.display());
         }

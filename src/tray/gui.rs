@@ -18,9 +18,6 @@ use crate::status::Primary;
 
 use super::SharedSnapshot;
 
-const CFG_PATH: &str = r"C:\ProgramData\gdut-net\config.toml";
-const LOG_DIR: &str = r"C:\ProgramData\gdut-net\logs";
-
 // ---- 校园卡色板（方向契约的精确取值；与安装器同一世界）----
 
 /// 卡蓝：卡面与主按钮。
@@ -236,7 +233,7 @@ fn install_style(ctx: &egui::Context) {
 
 /// 学号：空值视为无卡。
 fn load_student_id() -> Option<String> {
-    crate::config::Config::load(std::path::Path::new(CFG_PATH))
+    crate::config::Config::load(std::path::Path::new(crate::paths::CONFIG_PATH))
         .ok()
         .map(|c| c.account.student_id)
         .filter(|s| !s.trim().is_empty())
@@ -244,7 +241,9 @@ fn load_student_id() -> Option<String> {
 
 /// 配置 mtime：R4——每帧一次 stat，变化才重读学号。
 fn config_mtime() -> Option<std::time::SystemTime> {
-    std::fs::metadata(CFG_PATH).and_then(|m| m.modified()).ok()
+    std::fs::metadata(crate::paths::CONFIG_PATH)
+        .and_then(|m| m.modified())
+        .ok()
 }
 
 struct Gui {
@@ -808,7 +807,7 @@ fn launch_setup(args: &[&str]) {
 
 /// 打开日志目录（资源管理器）。
 fn open_logs() {
-    let dir = std::path::PathBuf::from(LOG_DIR);
+    let dir = std::path::PathBuf::from(crate::paths::LOGS_DIR);
     let _ = std::fs::create_dir_all(&dir);
     let _ = std::process::Command::new("explorer.exe").arg(&dir).spawn();
 }
