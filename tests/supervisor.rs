@@ -317,6 +317,15 @@ fn without_metric(effects: Vec<Effect>) -> Vec<Effect> {
         .collect()
 }
 
+/// 仅取 metric 效果（顺序保留）。
+fn metric_effects(effects: &[Effect]) -> Vec<Effect> {
+    effects
+        .iter()
+        .filter(|e| matches!(e, Effect::SuppressMetric { .. } | Effect::ReleaseMetric))
+        .cloned()
+        .collect()
+}
+
 // ---------------------------------------------------------------------------
 // Step 2 场景：有线调度最早三例
 // ---------------------------------------------------------------------------
@@ -1171,34 +1180,87 @@ async fn metric_suppress_release_by_mode_and_wired_health() {
     h.advance_to_wake().await; // t=0: 拨号 → Connected
     h.take_wireless();
 
-    // 切 exclusive 且有线健康 → 释放压制。
+    // 每拍重发（final-review fix）：条件成立的连续两拍都发 SuppressMetric，
+    // RouteGuard 内部去重；瞬时 SetIpInterfaceEntry 失败在下一拍自愈。
+    h.run_until(2_000).await;
+    assert_eq!(
+        metric_effects(&h.take_wireless()),
+        vec![Effect::SuppressMetric {
+            ifindex: 15,
+            target: 100
+        }],
+        "standby tick 1"
+    );
+    h.run_until(4_000).await;
+    assert_eq!(
+        metric_effects(&h.take_wireless()),
+        vec![Effect::SuppressMetric {
+            ifindex: 15,
+            target: 100
+        }],
+        "standby tick 2: retried, not one-shot"
+    );
+
+    // 切 exclusive 且有线健康 → 连续两拍都发 ReleaseMetric（不再发 Suppress）。
     h.push(Event::Command(Command::SetMode {
         mode: NetMode::WiredExclusive,
     }))
     .await;
-    h.run_until(2_000).await;
-    assert!(
-        h.take_wireless().contains(&Effect::ReleaseMetric),
-        "exclusive + wired healthy releases metric"
+    h.run_until(6_000).await;
+    assert_eq!(
+        metric_effects(&h.take_wireless()),
+        vec![Effect::ReleaseMetric],
+        "exclusive + wired healthy tick 1"
+    );
+    h.run_until(8_000).await;
+    assert_eq!(
+        metric_effects(&h.take_wireless()),
+        vec![Effect::ReleaseMetric],
+        "exclusive + wired healthy tick 2: retried, not one-shot"
     );
 
-    // 拔线（有线不健康）→ 重新压制。
+    // 拔线（有线不健康）→ 恢复每拍压制。
     h.world.link = Some(false);
-    h.run_until(4_000).await;
+    h.run_until(10_000).await;
+    assert_eq!(
+        metric_effects(&h.take_wireless()),
+        vec![Effect::SuppressMetric {
+            ifindex: 15,
+            target: 100
+        }],
+        "exclusive + unhealthy suppresses metric again"
+    );
+
+    // 插线恢复健康 → 每拍再释放（拔线期间链路轮询 2s，恢复检测在下一个轮询拍）。
+    h.world.link = Some(true);
+    h.run_until(12_000).await;
+    assert_eq!(
+        metric_effects(&h.take_wireless()),
+        vec![Effect::ReleaseMetric],
+        "wired healthy again releases metric"
+    );
+    h.run_until(14_000).await;
+    assert_eq!(
+        metric_effects(&h.take_wireless()),
+        vec![Effect::ReleaseMetric],
+        "and keeps releasing every tick"
+    );
+}
+
+#[tokio::test]
+async fn metric_zero_target_still_emits_suppress_for_the_adapter_noop() {
+    // 决策在核心、幂等在 adapter：target==0 照发（RouteGuard 内部 no-op）。
+    let mut cfg = wireless_cfg(NetMode::WiredPlusStandby);
+    cfg.wireless.standby_metric = 0;
+    let mut h = Harness::new(cfg, false);
+    h.world.wireless = wlan_sample("10.1.1.5", Some("10.1.1.1"), 15);
+    h.push(Event::Started).await;
     assert!(
         h.take_wireless().contains(&Effect::SuppressMetric {
             ifindex: 15,
-            target: 100
+            target: 0
         }),
-        "exclusive + unhealthy suppresses metric"
-    );
-
-    // 插线恢复健康 → 再释放（拔线期间链路轮询 2s，恢复检测在下一个轮询拍）。
-    h.world.link = Some(true);
-    h.run_until(10_000).await;
-    assert!(
-        h.take_wireless().contains(&Effect::ReleaseMetric),
-        "wired healthy again releases metric"
+        "core makes the decision; the adapter no-ops on target 0"
     );
 }
 

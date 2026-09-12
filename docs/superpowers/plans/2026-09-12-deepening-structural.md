@@ -320,7 +320,7 @@ impl Watchdog { pub fn view(&self) -> SessionView; }
 3. **I3 状态机节拍**：`Effect::StepWatchdog` 只可能来自 (a) 到点的 `Wake`、(b) `Command::Redial`、(c) 链路 false→true 边沿。心跳/无线/事件环类事件永不触发它（79 次重拨事故结构性不可能）。
 4. **I4 车道**：同车道效果严格顺序执行；效果结果只经 Event 回灌；Main 车道与事件处理同步（等价今天的 run_once 独占），Wireless 车道在 worker 中执行（等价今天的 manager 任务）。
 5. **I5 链路门控**：已知链路态只接受 `Some(_)` 覆盖（首次采样例外）；拔线期间**绝不拨号**（`Watchdog` 自身 `Some(false)` 门控保证端口不被触碰）；到点的 watchdog 步进照常执行，会话状态如实转 `Backoff`/`Ethernet link down`（与旧 runtime 一致）；`Wake` 触发的步进在同一反应链里先 `SampleLink`（收窄：不等 2s 采样窗口）。
-6. **I6 无线生命周期**：`EnsureRoutes` 只在 `PortalAuth` 且 wlan IP+网关齐备时、`Settle` 之前发出；`TeardownRoutes` 在 `Disassociate`、`Stop`（以及 worker 的 `RouteGuard::drop` 兜底）发出；metric 压制仅 standby 或 exclusive 且有线不健康，exclusive+有线健康时释放；`verdict` 在每次认证尝试后与 `Disassociate` 清空、只由 `WlanProbeFinished` 设置（过去的无限重认证 Critical）；Joining 超时 60s → `brain.restart()`。
+6. **I6 无线生命周期**：`EnsureRoutes` 只在 `PortalAuth` 且 wlan IP+网关齐备时、`Settle` 之前发出；`TeardownRoutes` 在 `Disassociate`、`Stop`（以及 worker 的 `RouteGuard::drop` 兜底）发出；metric 压制仅 standby 或 exclusive 且有线不健康，exclusive+有线健康时释放；metric 效果每拍重发（RouteGuard 幂等去重；瞬时失败下一拍自愈）；`verdict` 在每次认证尝试后与 `Disassociate` 清空、只由 `WlanProbeFinished` 设置（过去的无限重认证 Critical）；Joining 超时 60s → `brain.restart()`。
 7. **I7 绝对唤醒**：`wake_at`/`link_poll_at`/`wireless_tick_at` 都是绝对毫秒；`Wake` 只重新判定哪些 deadline 到点；事件频率不影响任何 deadline。
 8. **I8 通知节流**：`Notify` 仅在 per-key 30 分钟窗口过期时发出；窗口只在 `NotifyResult{delivered:true}` 后开启；重拨失败 10 分钟阈值与拔线暂停豁免保持现状。
 9. **I9 结果护栏**：`sample_in_flight`/`auth_in_flight`/`associate_in_flight`/`probe_in_flight` 使重复/迟到结果成为 no-op。
@@ -360,7 +360,7 @@ impl Watchdog { pub fn view(&self) -> SessionView; }
 **Files:**
 - Modify: `src/runtime.rs`（重写 `run()`；删除 `wireless_manager`/`ManagerCfg`/四个内部通道/`compose`/`Notifier`/唤醒机制）
 - Modify: `src/watchdog.rs`（删除 `snapshot()`（占位字段）与 `eth_link()`；`set_eth_link` 保留）
-- Modify: `tests/watchdog.rs`（断言改用 `view()`；runtime 胶水相关的两段测试由 Task 8 harness 覆盖，删除）
+- Modify: `tests/watchdog.rs`（断言改用 `view()`；随 `snapshot()` 删除同时删 `view_matches_snapshot_wired_fields`（无比较对象）；`link_down_pauses_dial_and_link_up_redials` 保留——Task 8 harness 覆盖组合层，不替代 watchdog 自身链路门控的验证）
 - Read: `.superpowers/sdd/2026-09-12-deepening-structural/w8-design-comparison.md` §B（执行器义务、车道、停止握手）
 
 **接口**: 见 Task 8 的 `Supervisor`/`Event`/`Effect`/`Lane`/`Clock` 与 `SessionView`。

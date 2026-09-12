@@ -276,7 +276,6 @@ pub struct Supervisor {
     auth_in_flight: bool,
     probe_in_flight: bool,
     join_since_ms: Option<u64>,
-    metric_suppressed_ifindex: Option<u32>,
     portal_ip: Option<Ipv4Addr>,
     probe_ip: Option<Ipv4Addr>,
 }
@@ -321,7 +320,6 @@ impl Supervisor {
             auth_in_flight: false,
             probe_in_flight: false,
             join_since_ms: None,
-            metric_suppressed_ifindex: None,
             portal_ip: None,
             probe_ip: None,
         };
@@ -730,7 +728,10 @@ impl Supervisor {
         }
     }
 
-    /// metric 压制账本：standby 或 exclusive 且有线不健康时压制；有线健康时释放。
+    /// metric 策略（每拍重发，无本地"已应用"账本）：决策在核心、幂等在 adapter。
+    /// `RouteGuard` 内部按 (ifindex, 原值) 去重并在失败时清 applied 标志，
+    /// 所以瞬时 `Get/SetIpInterfaceEntry` 失败会在下一拍自愈；`target == 0`
+    /// 照发（guard 内部 no-op）。先 suppress 后 release，与旧 manager 顺序一致。
     fn update_metric(&mut self, effects: &mut Vec<Effect>) {
         let Some(wlan) = self.wlan else {
             return;
@@ -738,21 +739,13 @@ impl Supervisor {
         let wired_healthy =
             self.eth_link == Some(true) && self.session.status == SessionStatus::Connected;
         let takeover_active = self.mode == NetMode::WiredExclusive && !wired_healthy;
-        let target = self.cfg.wireless.standby_metric;
-        if (self.mode == NetMode::WiredPlusStandby || takeover_active)
-            && target != 0
-            && self.metric_suppressed_ifindex != Some(wlan.ifindex)
-        {
+        if self.mode == NetMode::WiredPlusStandby || takeover_active {
             effects.push(Effect::SuppressMetric {
                 ifindex: wlan.ifindex,
-                target,
+                target: self.cfg.wireless.standby_metric,
             });
-            self.metric_suppressed_ifindex = Some(wlan.ifindex);
         }
-        if self.mode == NetMode::WiredExclusive
-            && wired_healthy
-            && self.metric_suppressed_ifindex.take().is_some()
-        {
+        if self.mode == NetMode::WiredExclusive && wired_healthy {
             effects.push(Effect::ReleaseMetric);
         }
     }
@@ -869,8 +862,7 @@ impl Supervisor {
         self.auth_in_flight = false;
         self.probe_in_flight = false;
         self.join_since_ms = None;
-        // worker 退出时 RouteGuard::drop 已回滚；核心只清账本。
-        self.metric_suppressed_ifindex = None;
+        // worker 退出时 RouteGuard::drop 已回滚（路由 + metric 的第三出口）。
     }
 
     fn handle_stop(&mut self, wall: u64, effects: &mut Vec<Effect>) {
