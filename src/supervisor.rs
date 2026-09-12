@@ -198,10 +198,10 @@ impl Effect {
             | Effect::SetWatchdogLink(_)
             | Effect::Hangup
             | Effect::SampleLink
+            | Effect::SampleWireless
             | Effect::PersistMode(_)
             | Effect::Notify { .. } => Lane::Main,
-            Effect::SampleWireless
-            | Effect::CleanupStaleRoutes
+            Effect::CleanupStaleRoutes
             | Effect::Associate(_)
             | Effect::Disassociate
             | Effect::EnsureRoutes { .. }
@@ -370,7 +370,7 @@ impl Supervisor {
             match event {
                 Event::Started => {} // 幂等：Started 恰好一次
                 Event::Wake => self.handle_wake(now, &mut effects),
-                Event::Command(cmd) => self.handle_command(cmd, now, wall, &mut effects),
+                Event::Command(cmd) => self.handle_command(cmd, wall, &mut effects),
                 Event::LinkSampled(up) => self.handle_link_sampled(up, now, wall, &mut effects),
                 Event::WatchdogStepped(step) => {
                     self.handle_watchdog_stepped(step, now, &mut effects)
@@ -485,7 +485,7 @@ impl Supervisor {
         }
     }
 
-    fn handle_command(&mut self, cmd: Command, _now: u64, wall: u64, effects: &mut Vec<Effect>) {
+    fn handle_command(&mut self, cmd: Command, wall: u64, effects: &mut Vec<Effect>) {
         match cmd {
             Command::Redial => {
                 log::info!("IPC command: manual redial");
@@ -725,8 +725,9 @@ impl Supervisor {
                 if self.probe_in_flight {
                     return true;
                 }
+                // I6：verdict 只由 WlanProbeFinished 设置。Online 相里 wlan_ip 必然齐备
+                // （缺 IP 会先走 start_join），此分支仅为防御，不写 verdict。
                 let Some(wlan) = self.wlan else {
-                    self.verdict = Some(ProbeVerdict::LinkDown);
                     return false;
                 };
                 let url = format!("http://{}/", self.cfg.wireless.probe_host);

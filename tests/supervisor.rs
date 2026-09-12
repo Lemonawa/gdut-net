@@ -4,19 +4,22 @@
 //! 把结果事件回灌（等价 Task 9 壳的同步执行），Wireless 车道效果记录待测。
 
 use std::collections::VecDeque;
+use std::net::Ipv4Addr;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
 use gdut_net::config::Config;
-use gdut_net::ipc::protocol::{Command, HeartbeatStatus, NetMode, SessionStatus};
+use gdut_net::ipc::protocol::{
+    Command, HeartbeatStatus, NetMode, SessionStatus, WPhase, WirelessSnapshot,
+};
 use gdut_net::probe::ProbeVerdict;
 use gdut_net::ras::ErrKind;
 use gdut_net::supervisor::{
     Clock, Effect, Event, Lane, PortalAttempt, Reaction, Supervisor, ToastKey, WatchdogStep,
     WirelessSample, WlanSample,
 };
-use gdut_net::watchdog::{DialError, Dialer, Prober, Watchdog, WatchdogCfg};
+use gdut_net::watchdog::{DialError, Dialer, Prober, SessionView, Watchdog, WatchdogCfg};
 
 // ---------------------------------------------------------------------------
 // FakeClock
@@ -165,7 +168,6 @@ struct Harness {
     persisted: Vec<NetMode>,
     wake_at: Option<u64>,
     dial_calls: Arc<AtomicU32>,
-    failing: Arc<AtomicBool>,
     auto_sample_wireless: bool,
 }
 
@@ -173,10 +175,9 @@ impl Harness {
     fn new(cfg: Config, failing: bool) -> Self {
         let clock = FakeClock::new();
         let dial_calls = Arc::new(AtomicU32::new(0));
-        let failing = Arc::new(AtomicBool::new(failing));
         let dialer = MockDialer {
             calls: dial_calls.clone(),
-            fail: failing.clone(),
+            fail: Arc::new(AtomicBool::new(failing)),
             connected: false,
         };
         let wd = Watchdog::new(
@@ -201,7 +202,6 @@ impl Harness {
             persisted: Vec::new(),
             wake_at: None,
             dial_calls,
-            failing,
             auto_sample_wireless: true,
         }
     }
@@ -217,13 +217,7 @@ impl Harness {
                 self.effects.push(effect.clone());
                 match effect.lane() {
                     Lane::Main => self.exec_main(&effect, &mut queue).await,
-                    Lane::Wireless => {
-                        if self.auto_sample_wireless && matches!(effect, Effect::SampleWireless) {
-                            queue.push_back(Event::WirelessSampled(self.world.wireless));
-                        } else {
-                            self.wireless_out.push(effect);
-                        }
-                    }
+                    Lane::Wireless => self.wireless_out.push(effect),
                 }
             }
             reactions.push(r);
@@ -235,7 +229,12 @@ impl Harness {
         match effect {
             Effect::SampleLink => queue.push_back(Event::LinkSampled(self.world.link)),
             Effect::SampleWireless => {
-                queue.push_back(Event::WirelessSampled(self.world.wireless));
+                if self.auto_sample_wireless {
+                    queue.push_back(Event::WirelessSampled(self.world.wireless));
+                } else {
+                    // 测试显式回灌采样结果（I11 缺失结果场景）。
+                    self.wireless_out.push(Effect::SampleWireless);
+                }
             }
             Effect::SetWatchdogLink(up) => self.wd.set_eth_link(*up),
             Effect::RequestRedial => self.wd.request_redial(),
@@ -264,6 +263,10 @@ impl Harness {
         std::mem::take(&mut self.wireless_out)
     }
 
+    fn take_notifies(&mut self) -> Vec<(ToastKey, String, String)> {
+        std::mem::take(&mut self.notifies)
+    }
+
     fn ring(&self) -> Vec<String> {
         self.sup.snapshot().events.iter().cloned().collect()
     }
@@ -286,6 +289,19 @@ impl Harness {
     async fn start_and_connect(&mut self) {
         self.push(Event::Started).await;
         self.advance_to_wake().await;
+    }
+
+    /// 按绝对账本连续跑到 `target` 毫秒（每到点即 Wake）；防止不前进时死循环。
+    async fn run_until(&mut self, target: u64) {
+        for _ in 0..10_000 {
+            match self.wake_at {
+                Some(next) if next <= target => {
+                    self.advance_to_wake().await;
+                }
+                _ => return,
+            }
+        }
+        panic!("run_until made no progress");
     }
 }
 
@@ -393,4 +409,826 @@ async fn link_restore_redials_immediately() {
     );
     assert_eq!(h.dial_calls.load(Ordering::SeqCst), 2);
     assert!(h.ring_has("Ethernet link restored, redialing"));
+}
+
+// ---------------------------------------------------------------------------
+// Step 3-6 场景：命令 / 快照 / 通知 / 停止 / 护栏
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn set_mode_persists_rings_and_broadcasts() {
+    let mut h = Harness::new(wired_cfg(), false);
+    h.start_and_connect().await;
+    h.take_effects();
+
+    let reactions = h
+        .push(Event::Command(Command::SetMode {
+            mode: NetMode::WiredPlusStandby,
+        }))
+        .await;
+    assert_eq!(
+        h.take_effects(),
+        vec![Effect::PersistMode(NetMode::WiredPlusStandby)]
+    );
+    assert_eq!(h.persisted, vec![NetMode::WiredPlusStandby]);
+    assert!(h.ring_has("Mode switched to wired-plus-standby"));
+    assert_eq!(h.sup.snapshot().mode, NetMode::WiredPlusStandby);
+    assert!(
+        reactions.last().unwrap().snapshot.is_some(),
+        "mode + event ring change must publish"
+    );
+}
+
+#[tokio::test]
+async fn snapshot_publishes_only_on_change() {
+    let mut h = Harness::new(wired_cfg(), false);
+    h.push(Event::Started).await;
+    h.take_effects();
+
+    // 心跳值未变：无快照（I2 变化门控）。
+    let reactions = h.push(Event::Heartbeat(HeartbeatStatus::Off)).await;
+    assert!(reactions.last().unwrap().snapshot.is_none());
+
+    // 心跳变化：发布，且与 snapshot() 同值（同一组装函数）。
+    let reactions = h.push(Event::Heartbeat(HeartbeatStatus::Running)).await;
+    let published = reactions
+        .last()
+        .unwrap()
+        .snapshot
+        .clone()
+        .expect("heartbeat transition publishes");
+    assert_eq!(published, h.sup.snapshot());
+    assert_eq!(published.heartbeat, HeartbeatStatus::Running);
+
+    // to/from Error 也必须产生快照（选型收窄③）。
+    let reactions = h
+        .push(Event::Heartbeat(HeartbeatStatus::Error("x".into())))
+        .await;
+    assert!(reactions.last().unwrap().snapshot.is_some());
+    let reactions = h.push(Event::Heartbeat(HeartbeatStatus::Off)).await;
+    assert!(reactions.last().unwrap().snapshot.is_some());
+}
+
+#[tokio::test]
+async fn notify_throttle_only_on_delivered() {
+    let mut h = Harness::new(wired_cfg(), false);
+    h.push(Event::Started).await;
+
+    h.push(Event::Heartbeat(HeartbeatStatus::Error("e1".into())))
+        .await;
+    let notifies = h.take_notifies();
+    assert_eq!(notifies.len(), 1);
+    assert_eq!(notifies[0].0, ToastKey::HeartbeatError);
+    assert_eq!(notifies[0].1, "gdut-net heartbeat error");
+    assert!(notifies[0].2.contains("e1"));
+
+    // 在飞：不重发。
+    h.push(Event::Heartbeat(HeartbeatStatus::Error("e2".into())))
+        .await;
+    assert!(h.take_notifies().is_empty());
+
+    // 投递失败：窗口不开启，下次仍发。
+    h.push(Event::NotifyResult {
+        key: ToastKey::HeartbeatError,
+        delivered: false,
+    })
+    .await;
+    h.push(Event::Heartbeat(HeartbeatStatus::Error("e3".into())))
+        .await;
+    assert_eq!(
+        h.take_notifies().len(),
+        1,
+        "failed delivery must not open the 30min window"
+    );
+
+    // 投递成功：30 分钟窗口开启。
+    h.push(Event::NotifyResult {
+        key: ToastKey::HeartbeatError,
+        delivered: true,
+    })
+    .await;
+    h.clock.advance(29 * 60 * 1000);
+    h.push(Event::Heartbeat(HeartbeatStatus::Error("e4".into())))
+        .await;
+    assert!(h.take_notifies().is_empty(), "throttled inside 30min");
+
+    h.clock.advance(2 * 60 * 1000);
+    h.push(Event::Heartbeat(HeartbeatStatus::Error("e5".into())))
+        .await;
+    assert_eq!(h.take_notifies().len(), 1, "window expired after 30min");
+}
+
+#[tokio::test]
+async fn redial_failing_toast_and_link_down_exemption() {
+    let mut h = Harness::new(wired_cfg(), true);
+    h.push(Event::Started).await;
+
+    // 拨号连续失败：第一次到点的 WatchdogStepped 跨过 10 分钟阈值时弹一次。
+    h.run_until(900_000).await;
+    let notifies = h.take_notifies();
+    assert_eq!(notifies.len(), 1, "exactly one RedialFailing toast");
+    assert_eq!(notifies[0].0, ToastKey::RedialFailing);
+    assert_eq!(notifies[0].1, "gdut-net network error");
+    assert!(notifies[0].2.contains("Redial failed for"));
+    assert!(notifies[0].2.contains("check network or credentials"));
+
+    h.push(Event::NotifyResult {
+        key: ToastKey::RedialFailing,
+        delivered: true,
+    })
+    .await;
+
+    // 拔线暂停豁免：10 分钟阈值虽已越过，但拔线期间不弹（keep 现状）。
+    h.world.link = Some(false);
+    h.run_until(1_000_000).await;
+    h.take_notifies();
+    let dials_before = h.dial_calls.load(Ordering::SeqCst);
+    h.push(Event::Command(Command::Redial)).await;
+    assert_eq!(
+        h.dial_calls.load(Ordering::SeqCst),
+        dials_before,
+        "watchdog link gate: manual redial while cable out never touches the port"
+    );
+    assert!(
+        h.take_notifies().is_empty(),
+        "cable-down pause must not toast"
+    );
+}
+
+#[tokio::test]
+async fn late_and_duplicate_results_are_inert() {
+    let mut h = Harness::new(wireless_cfg(NetMode::WiredPlusStandby), false);
+    h.start_and_connect().await; // Started 的自动无线采样让 brain 进入 Joining
+    h.take_effects();
+    h.take_wireless();
+
+    // Associate 结果（在飞）无副作用；重复结果与无在飞请求的结果全部 no-op（I9）。
+    h.push(Event::AssociateFinished(Ok(()))).await;
+    h.push(Event::AssociateFinished(Err("late".into()))).await;
+    h.push(Event::LinkSampled(Some(false))).await;
+    h.push(Event::WirelessSampled(wlan_sample(
+        "10.1.1.5",
+        Some("10.1.1.1"),
+        15,
+    )))
+    .await;
+    h.push(Event::PortalFinished(PortalAttempt::Replied {
+        status: 200,
+        body: r#"dr1004({"result":"1"})"#.into(),
+    }))
+    .await;
+    h.push(Event::WlanProbeFinished(ProbeVerdict::Kicked)).await;
+    assert_eq!(h.take_effects(), vec![]);
+    assert_eq!(h.take_wireless(), vec![]);
+    assert!(
+        !h.ring_has("portal login success") && !h.ring_has("Wireless probe: Kicked"),
+        "duplicate results must not touch the event ring"
+    );
+
+    // 迟到的 LinkSampled(Some(false)) 没有翻转已知链路态。
+    h.advance_to_wake().await;
+    assert!(
+        !h.take_effects()
+            .iter()
+            .any(|e| matches!(e, Effect::SetWatchdogLink(Some(false)))),
+        "late LinkSampled must not flip the known link state"
+    );
+}
+
+#[tokio::test]
+async fn missing_sample_result_never_double_samples() {
+    let mut h = Harness::new(wireless_cfg(NetMode::WiredPlusStandby), false);
+    h.auto_sample_wireless = false; // 采样结果由测试显式回灌
+    h.push(Event::Started).await;
+    let started = h.take_wireless();
+    assert_eq!(
+        started,
+        vec![Effect::CleanupStaleRoutes, Effect::SampleWireless]
+    );
+
+    // 采样在飞：连续 Wake 绝不重发 SampleWireless（I11 绝不双发）。
+    h.advance_to_wake().await;
+    assert!(
+        !h.take_wireless()
+            .iter()
+            .any(|e| matches!(e, Effect::SampleWireless)),
+        "no double sample while one is in flight"
+    );
+    h.advance_to_wake().await;
+    assert!(
+        !h.take_wireless()
+            .iter()
+            .any(|e| matches!(e, Effect::SampleWireless)),
+        "retry wakes must not double-send"
+    );
+
+    // 迟到结果仍被接受并驱动 brain。
+    h.push(Event::WirelessSampled(wlan_sample(
+        "10.1.1.5",
+        Some("10.1.1.1"),
+        15,
+    )))
+    .await;
+    assert!(
+        h.take_wireless()
+            .iter()
+            .any(|e| matches!(e, Effect::Associate(_))),
+        "late result still drives the brain"
+    );
+
+    // 护栏清空后恢复采样。
+    h.advance_to_wake().await;
+    assert!(
+        h.take_wireless()
+            .iter()
+            .any(|e| matches!(e, Effect::SampleWireless)),
+        "tick resumes after the late result"
+    );
+}
+
+#[tokio::test]
+async fn started_and_stop_are_once() {
+    let mut h = Harness::new(wired_cfg(), false);
+    // Started 之前的事件：全部惰性（I10：Started 最先）。
+    h.push(Event::Wake).await;
+    h.push(Event::Stop).await;
+    assert_eq!(h.take_effects(), vec![]);
+    assert_eq!(h.wake_at, None);
+
+    h.push(Event::Started).await;
+    h.take_effects();
+    // 第二次 Started 幂等。
+    h.push(Event::Started).await;
+    assert_eq!(h.take_effects(), vec![]);
+
+    let reactions = h.push(Event::Stop).await;
+    assert_eq!(h.take_effects(), vec![Effect::Hangup]);
+    assert_eq!(
+        reactions.last().unwrap().wake_at,
+        None,
+        "Stop clears the timer"
+    );
+
+    // Stop 之后任意事件惰性。
+    h.push(Event::Stop).await;
+    h.push(Event::Wake).await;
+    h.push(Event::Command(Command::Redial)).await;
+    h.push(Event::LinkSampled(Some(true))).await;
+    assert_eq!(h.take_effects(), vec![]);
+    assert_eq!(h.wake_at, None);
+}
+
+#[tokio::test]
+async fn event_storms_never_fragment_backoff() {
+    let mut h = Harness::new(wired_cfg(), true);
+    h.push(Event::Started).await;
+    // 两次失败步进（0s、1s）后取一个绝对 deadline。
+    h.run_until(1_000).await;
+    let armed = h.wake_at.expect("timer");
+    for _ in 0..50 {
+        h.push(Event::Heartbeat(HeartbeatStatus::Running)).await;
+        h.push(Event::WirelessSampled(WirelessSample::default()))
+            .await;
+        h.push(Event::Wake).await; // 提前 Wake：只重判定到点，不改 deadline
+    }
+    assert_eq!(
+        h.wake_at,
+        Some(armed),
+        "event frequency must not move any deadline (I7)"
+    );
+
+    // 79 次重拨事故回归：7 分钟内拨号次数 = 指数退避排程，不是事件数。
+    h.take_effects();
+    let mut steps = 0usize;
+    while let Some(next) = h.wake_at {
+        if next > 420_000 {
+            break;
+        }
+        let now = h.clock.now();
+        if next > now {
+            h.clock.advance(next - now);
+        }
+        for _ in 0..5 {
+            h.push(Event::Heartbeat(HeartbeatStatus::Running)).await;
+            h.push(Event::WirelessSampled(WirelessSample::default()))
+                .await;
+        }
+        assert!(
+            h.take_effects()
+                .iter()
+                .all(|e| !matches!(e, Effect::StepWatchdog)),
+            "heartbeat/wireless events must never trigger StepWatchdog (I3)"
+        );
+        let reactions = h.push(Event::Wake).await;
+        for r in &reactions {
+            steps += r
+                .effects
+                .iter()
+                .filter(|e| matches!(e, Effect::StepWatchdog))
+                .count();
+        }
+        h.take_effects();
+    }
+    assert_eq!(
+        steps, 7,
+        "steps at 3s,7s,15s,31s,63s,127s,255s after the storm"
+    );
+    assert_eq!(
+        h.dial_calls.load(Ordering::SeqCst),
+        9,
+        "0s/1s steps + 7 storm-timeline steps; event storms never dial"
+    );
+}
+
+async fn purity_script() -> Vec<Reaction> {
+    let mut h = Harness::new(wired_cfg(), true);
+    let mut all = Vec::new();
+    all.extend(h.push(Event::Started).await);
+    all.extend(h.advance_to_wake().await);
+    h.world.link = Some(false);
+    h.clock.advance(2_000);
+    all.extend(h.push(Event::Wake).await);
+    h.world.link = Some(true);
+    all.extend(h.advance_to_wake().await);
+    all.extend(
+        h.push(Event::Heartbeat(HeartbeatStatus::Error("x".into())))
+            .await,
+    );
+    all.extend(h.push(Event::Command(Command::Redial)).await);
+    all.extend(h.advance_to_wake().await);
+    all.extend(h.push(Event::Stop).await);
+    all
+}
+
+#[tokio::test]
+async fn same_input_sequence_yields_same_reactions() {
+    assert_eq!(
+        purity_script().await,
+        purity_script().await,
+        "I1: identical state+events+clock ⇒ identical reactions"
+    );
+}
+
+#[tokio::test]
+async fn arbitrary_event_sequences_do_not_panic() {
+    let mut h = Harness::new(wireless_cfg(NetMode::WiredExclusive), false);
+    // Started 之前：惰性。
+    h.push(Event::Wake).await;
+    h.push(Event::Stop).await;
+    assert_eq!(h.take_effects(), vec![]);
+
+    h.push(Event::Started).await;
+    let junk = vec![
+        Event::Wake,
+        Event::LinkSampled(None),
+        Event::LinkSampled(Some(false)),
+        Event::Wake,
+        Event::Heartbeat(HeartbeatStatus::Off),
+        Event::Command(Command::Redial),
+        Event::Command(Command::SetMode {
+            mode: NetMode::WiredPlusStandby,
+        }),
+        Event::NotifyResult {
+            key: ToastKey::RedialFailing,
+            delivered: true,
+        },
+        Event::WirelessDied,
+        Event::Started,
+        Event::WatchdogStepped(WatchdogStep {
+            delay: Duration::from_secs(1),
+            session: SessionView {
+                status: SessionStatus::Backoff,
+                since_unix: None,
+                last_drop_reason: Some("junk".into()),
+                redial_attempts: 7,
+            },
+            ppp_ip: None,
+        }),
+        Event::Stop,
+    ];
+    for _ in 0..3 {
+        for ev in &junk {
+            h.push(ev.clone()).await;
+        }
+    }
+    assert_eq!(h.wake_at, None, "Stop is terminal");
+    let _ = h.sup.snapshot();
+}
+
+#[tokio::test]
+async fn manual_redial_steps_immediately() {
+    let mut h = Harness::new(wired_cfg(), false);
+    h.start_and_connect().await;
+    h.take_effects();
+    assert_eq!(h.dial_calls.load(Ordering::SeqCst), 1);
+
+    // I3(b)：Command::Redial 是合法 StepWatchdog 触发点。
+    h.push(Event::Command(Command::Redial)).await;
+    assert_eq!(
+        h.take_effects(),
+        vec![Effect::RequestRedial, Effect::StepWatchdog]
+    );
+    assert_eq!(h.dial_calls.load(Ordering::SeqCst), 2);
+}
+
+#[test]
+fn password_is_held_for_the_shell() {
+    // Supervisor 是明文密码唯一所有者（Task 9 worker 构建 portal URL 用）。
+    let sup = Supervisor::new(wired_cfg(), "s3cret".into(), FakeClock::new());
+    assert_eq!(sup.password(), "s3cret");
+}
+
+#[test]
+fn every_effect_has_exactly_one_lane() {
+    let main = vec![
+        Effect::StepWatchdog,
+        Effect::RequestRedial,
+        Effect::SetWatchdogLink(Some(true)),
+        Effect::SetWatchdogLink(None),
+        Effect::Hangup,
+        Effect::SampleLink,
+        Effect::SampleWireless,
+        Effect::PersistMode(NetMode::WiredExclusive),
+        Effect::Notify {
+            key: ToastKey::HeartbeatError,
+            title: "t".into(),
+            body: "b".into(),
+        },
+    ];
+    for effect in main {
+        assert_eq!(effect.lane(), Lane::Main, "{effect:?}");
+    }
+    let wireless = vec![
+        Effect::CleanupStaleRoutes,
+        Effect::Associate("p".into()),
+        Effect::Disassociate,
+        Effect::EnsureRoutes {
+            dests: vec![Ipv4Addr::new(10, 0, 3, 2)],
+            gateway: Ipv4Addr::new(10, 1, 1, 1),
+            ifindex: 15,
+        },
+        Effect::SuppressMetric {
+            ifindex: 15,
+            target: 100,
+        },
+        Effect::ReleaseMetric,
+        Effect::TeardownRoutes,
+        Effect::Settle(Duration::from_secs(3)),
+        Effect::PortalAuth {
+            src_ip: Ipv4Addr::new(10, 1, 1, 5),
+            timeout: Duration::from_secs(20),
+        },
+        Effect::WlanProbe {
+            src_ip: Ipv4Addr::new(10, 1, 1, 5),
+            gateway: None,
+            url: "http://223.5.5.5/".into(),
+        },
+    ];
+    for effect in wireless {
+        assert_eq!(effect.lane(), Lane::Wireless, "{effect:?}");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 无线编排场景（I6）
+// ---------------------------------------------------------------------------
+
+const PORTAL_SUCCESS: &str = r#"dr1004({"result":"1"})"#;
+
+#[tokio::test]
+async fn verdict_cleared_after_auth_then_probe_now() {
+    let mut h = Harness::new(wireless_cfg(NetMode::WiredPlusStandby), false);
+    h.world.wireless = wlan_sample("10.1.1.5", Some("10.1.1.1"), 15);
+    h.push(Event::Started).await; // 自动采样 → Associate
+    assert!(without_metric(h.take_wireless()).contains(&Effect::Associate("gdut".into())));
+    h.push(Event::AssociateFinished(Ok(()))).await;
+    h.advance_to_wake().await; // t=0: 拨号 → Connected
+    h.take_wireless();
+
+    // 关联成功 + IP：Joining → Authing → PortalAuth（EnsureRoutes 先于 Settle/PortalAuth）。
+    h.run_until(2_000).await;
+    let effects = without_metric(h.take_wireless());
+    assert!(
+        matches!(
+            effects.as_slice(),
+            [
+                Effect::EnsureRoutes { .. },
+                Effect::Settle(_),
+                Effect::PortalAuth { .. }
+            ]
+        ),
+        "got {effects:?}"
+    );
+
+    h.push(Event::PortalFinished(PortalAttempt::Replied {
+        status: 200,
+        body: PORTAL_SUCCESS.into(),
+    }))
+    .await;
+    assert_eq!(h.sup.snapshot().wireless.phase, WPhase::Online);
+
+    // Online 且无缓存 verdict → 立即 ProbeNow。
+    h.run_until(4_000).await;
+    let effects = without_metric(h.take_wireless());
+    assert!(
+        matches!(effects.as_slice(), [Effect::WlanProbe { .. }]),
+        "first probe after auth, got {effects:?}"
+    );
+
+    // Kicked → 下一次决策是合法重认证。
+    h.push(Event::WlanProbeFinished(ProbeVerdict::Kicked)).await;
+    assert!(h.ring_has("Wireless probe: Kicked"));
+    h.run_until(6_000).await;
+    let effects = without_metric(h.take_wireless());
+    assert!(
+        matches!(
+            effects.as_slice(),
+            [
+                Effect::EnsureRoutes { .. },
+                Effect::Settle(_),
+                Effect::PortalAuth { .. }
+            ]
+        ),
+        "kicked re-auth, got {effects:?}"
+    );
+
+    // 认证后 verdict 必须清空：下一拍回到 ProbeNow，而不是无限重认证（Critical 回归）。
+    h.push(Event::PortalFinished(PortalAttempt::Replied {
+        status: 200,
+        body: PORTAL_SUCCESS.into(),
+    }))
+    .await;
+    h.run_until(8_000).await;
+    let effects = without_metric(h.take_wireless());
+    assert!(
+        effects
+            .iter()
+            .any(|e| matches!(e, Effect::WlanProbe { .. })),
+        "probe after the auth attempt, got {effects:?}"
+    );
+    assert!(
+        !effects
+            .iter()
+            .any(|e| matches!(e, Effect::PortalAuth { .. })),
+        "stale Kicked must not survive the auth attempt: {effects:?}"
+    );
+    assert_eq!(
+        h.ring()
+            .iter()
+            .filter(|l| l.contains("portal login success"))
+            .count(),
+        2
+    );
+}
+
+#[tokio::test]
+async fn ensure_routes_only_on_portal_auth() {
+    let mut h = Harness::new(wireless_cfg(NetMode::WiredPlusStandby), false);
+    h.world.wireless = wlan_sample("10.1.1.5", Some("10.1.1.1"), 15);
+    h.push(Event::Started).await;
+    let first = without_metric(h.take_wireless());
+    assert!(first.iter().any(|e| matches!(e, Effect::Associate(_))));
+    assert!(
+        !first
+            .iter()
+            .any(|e| matches!(e, Effect::EnsureRoutes { .. })),
+        "Associate must not ensure routes: {first:?}"
+    );
+    h.advance_to_wake().await;
+    h.take_wireless();
+    h.push(Event::AssociateFinished(Ok(()))).await;
+
+    // wlan IP 有、网关缺失：不产生 EnsureRoutes/Settle/PortalAuth（on_auth(false) 回报）。
+    h.world.wireless = wlan_sample("10.1.1.5", None, 15);
+    h.run_until(2_000).await;
+    assert!(
+        h.take_wireless().is_empty(),
+        "PortalAuth without gateway must not ensure routes"
+    );
+
+    // Error 退避后重新关联，再以齐备网关认证：EnsureRoutes + Settle + PortalAuth。
+    h.run_until(8_000).await;
+    assert!(without_metric(h.take_wireless())
+        .iter()
+        .any(|e| matches!(e, Effect::Associate(_))));
+    h.push(Event::AssociateFinished(Ok(()))).await;
+    h.world.wireless = wlan_sample("10.1.1.5", Some("10.1.1.1"), 15);
+    h.run_until(10_000).await;
+    assert_eq!(
+        without_metric(h.take_wireless()),
+        vec![
+            Effect::EnsureRoutes {
+                dests: vec![Ipv4Addr::new(10, 0, 3, 2), Ipv4Addr::new(223, 5, 5, 5)],
+                gateway: Ipv4Addr::new(10, 1, 1, 1),
+                ifindex: 15,
+            },
+            Effect::Settle(Duration::from_secs(3)),
+            Effect::PortalAuth {
+                src_ip: Ipv4Addr::new(10, 1, 1, 5),
+                timeout: Duration::from_secs(20),
+            },
+        ]
+    );
+}
+
+#[tokio::test]
+async fn takeover_debounce_and_release_after() {
+    let mut h = Harness::new(wireless_cfg(NetMode::WiredExclusive), false);
+    h.push(Event::Started).await;
+    h.advance_to_wake().await; // t=0: 拨号 → Connected
+    h.take_wireless();
+
+    // 有线健康：保持 Off，不接管。
+    h.run_until(6_000).await;
+    assert!(!h
+        .take_wireless()
+        .iter()
+        .any(|e| matches!(e, Effect::Associate(_))));
+
+    // 拔线：8000 首次判不健康；8s 去抖后 16000 才接管。
+    h.world.link = Some(false);
+    h.run_until(15_998).await;
+    assert!(
+        !h.take_wireless()
+            .iter()
+            .any(|e| matches!(e, Effect::Associate(_))),
+        "takeover must wait takeover_after=8s"
+    );
+    h.run_until(16_000).await;
+    assert!(
+        h.take_wireless()
+            .iter()
+            .any(|e| matches!(e, Effect::Associate(_))),
+        "takeover at unhealthy_since+8s"
+    );
+
+    // 插线恢复：有线健康 10s 后让位（release_after=10s）。
+    h.world.link = Some(true);
+    h.run_until(27_998).await;
+    assert!(
+        !h.take_wireless()
+            .iter()
+            .any(|e| matches!(e, Effect::Disassociate)),
+        "release must wait release_after=10s"
+    );
+    h.run_until(28_000).await;
+    let effects = h.take_wireless();
+    assert!(
+        effects.iter().any(|e| matches!(e, Effect::Disassociate)),
+        "release at healthy_since+10s: {effects:?}"
+    );
+    assert!(h.ring_has("Wireless: releasing (wired healthy)"));
+}
+
+#[tokio::test]
+async fn metric_suppress_release_by_mode_and_wired_health() {
+    let mut h = Harness::new(wireless_cfg(NetMode::WiredPlusStandby), false);
+    h.world.wireless = wlan_sample("10.1.1.5", Some("10.1.1.1"), 15);
+    h.push(Event::Started).await;
+    assert_eq!(
+        h.take_wireless(),
+        vec![
+            Effect::CleanupStaleRoutes,
+            Effect::Associate("gdut".into()),
+            Effect::SuppressMetric {
+                ifindex: 15,
+                target: 100
+            },
+        ],
+        "standby suppresses WLAN metric"
+    );
+    h.advance_to_wake().await; // t=0: 拨号 → Connected
+    h.take_wireless();
+
+    // 切 exclusive 且有线健康 → 释放压制。
+    h.push(Event::Command(Command::SetMode {
+        mode: NetMode::WiredExclusive,
+    }))
+    .await;
+    h.run_until(2_000).await;
+    assert!(
+        h.take_wireless().contains(&Effect::ReleaseMetric),
+        "exclusive + wired healthy releases metric"
+    );
+
+    // 拔线（有线不健康）→ 重新压制。
+    h.world.link = Some(false);
+    h.run_until(4_000).await;
+    assert!(
+        h.take_wireless().contains(&Effect::SuppressMetric {
+            ifindex: 15,
+            target: 100
+        }),
+        "exclusive + unhealthy suppresses metric"
+    );
+
+    // 插线恢复健康 → 再释放（拔线期间链路轮询 5s，恢复检测在下一个轮询拍）。
+    h.world.link = Some(true);
+    h.run_until(10_000).await;
+    assert!(
+        h.take_wireless().contains(&Effect::ReleaseMetric),
+        "wired healthy again releases metric"
+    );
+}
+
+#[tokio::test]
+async fn teardown_on_release_and_stop() {
+    let mut h = Harness::new(wireless_cfg(NetMode::WiredPlusStandby), false);
+    h.world.wireless = wlan_sample("10.1.1.5", Some("10.1.1.1"), 15);
+    h.push(Event::Started).await;
+    h.take_wireless();
+    h.advance_to_wake().await; // t=0: 拨号 → Connected
+    h.push(Event::AssociateFinished(Ok(()))).await;
+    h.run_until(2_000).await; // PortalAuth 三连
+    h.take_wireless();
+    h.push(Event::PortalFinished(PortalAttempt::Replied {
+        status: 200,
+        body: PORTAL_SUCCESS.into(),
+    }))
+    .await;
+    assert_eq!(h.sup.snapshot().wireless.phase, WPhase::Online);
+
+    // 切 exclusive 且有线健康：10s 后让位 → TeardownRoutes + Disassociate。
+    h.push(Event::Command(Command::SetMode {
+        mode: NetMode::WiredExclusive,
+    }))
+    .await;
+    h.run_until(13_998).await;
+    assert!(!h
+        .take_wireless()
+        .iter()
+        .any(|e| matches!(e, Effect::TeardownRoutes)));
+    h.run_until(14_000).await;
+    assert_eq!(
+        without_metric(h.take_wireless()),
+        vec![Effect::TeardownRoutes, Effect::Disassociate]
+    );
+    assert!(h.ring_has("Wireless: releasing (wired healthy)"));
+
+    // Stop：Main Hangup + Wireless teardown/disassociate（自包含铁律，不被取消）。
+    h.take_effects();
+    let reactions = h.push(Event::Stop).await;
+    assert_eq!(
+        h.take_effects(),
+        vec![Effect::Hangup, Effect::TeardownRoutes, Effect::Disassociate]
+    );
+    assert!(h.ring_has("Wireless: manager stopped"));
+    assert_eq!(reactions.last().unwrap().wake_at, None);
+}
+
+#[tokio::test]
+async fn join_timeout_restarts_association() {
+    let mut h = Harness::new(wireless_cfg(NetMode::WiredPlusStandby), false);
+    h.push(Event::Started).await;
+    h.take_wireless();
+    h.advance_to_wake().await; // t=0: 拨号
+    h.push(Event::AssociateFinished(Ok(()))).await; // join_since = 0
+
+    h.run_until(60_000).await;
+    assert!(
+        !h.ring_has("Wireless: join timeout"),
+        "exactly 60s is not over the timeout"
+    );
+    h.run_until(62_000).await;
+    assert!(h.ring_has("Wireless: join timeout, restarting"));
+    assert!(
+        !h.take_wireless()
+            .iter()
+            .any(|e| matches!(e, Effect::Associate(_))),
+        "restart happens after the tick's decision"
+    );
+
+    h.run_until(64_000).await;
+    assert!(
+        h.take_wireless()
+            .iter()
+            .any(|e| matches!(e, Effect::Associate(_))),
+        "brain.restart → next tick reassociates"
+    );
+}
+
+#[tokio::test]
+async fn wireless_died_degrades_to_default_snapshot() {
+    let mut h = Harness::new(wireless_cfg(NetMode::WiredPlusStandby), false);
+    h.world.wireless = wlan_sample("10.1.1.5", Some("10.1.1.1"), 15);
+    h.push(Event::Started).await;
+    h.take_wireless();
+    h.advance_to_wake().await;
+    h.push(Event::AssociateFinished(Ok(()))).await;
+    h.run_until(2_000).await;
+    h.push(Event::PortalFinished(PortalAttempt::Replied {
+        status: 200,
+        body: PORTAL_SUCCESS.into(),
+    }))
+    .await;
+    assert_eq!(h.sup.snapshot().wireless.phase, WPhase::Online);
+    h.take_wireless();
+
+    h.push(Event::WirelessDied).await;
+    assert!(h.ring_has("Wireless: manager stopped"));
+    assert_eq!(h.sup.snapshot().wireless, WirelessSnapshot::default());
+
+    // 无线 lane 死后：节拍停止，不再产生无线效果。
+    h.run_until(10_000).await;
+    assert!(h.take_wireless().is_empty());
 }
