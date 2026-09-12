@@ -655,6 +655,7 @@ mod win {
                 None => Duration::from_secs(60 * 60 * 24), // 无定时器：长时间挂起
             };
             tokio::select! {
+                biased;
                 // 顺序即优先级：stop 最先。
                 _ = stop.cancelled() => {
                     log::info!("Stop signal received, hanging up and exiting");

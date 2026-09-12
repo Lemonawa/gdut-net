@@ -67,7 +67,7 @@ async fn dials_then_reports_connected() {
         cfg(),
     );
     wd.run_once().await;
-    assert_eq!(wd.snapshot().status, SessionStatus::Connected);
+    assert_eq!(wd.view().status, SessionStatus::Connected);
 }
 
 #[tokio::test]
@@ -81,10 +81,10 @@ async fn link_down_pauses_dial_and_link_up_redials() {
     wd.set_eth_link(Some(false));
     let wait = wd.run_once().await;
     assert_eq!(wd.dial_calls(), 0);
-    assert_eq!(wd.snapshot().status, SessionStatus::Backoff);
+    assert_eq!(wd.view().status, SessionStatus::Backoff);
     assert_eq!(wait, gdut_net::watchdog::LINK_DOWN_RETRY);
     assert_eq!(
-        wd.snapshot().last_drop_reason.as_deref(),
+        wd.view().last_drop_reason.as_deref(),
         Some("Ethernet link down")
     );
 
@@ -93,7 +93,7 @@ async fn link_down_pauses_dial_and_link_up_redials() {
     wd.request_redial();
     wd.run_once().await;
     assert_eq!(wd.dial_calls(), 1);
-    assert_eq!(wd.snapshot().status, SessionStatus::Connected);
+    assert_eq!(wd.view().status, SessionStatus::Connected);
 }
 
 #[tokio::test]
@@ -116,8 +116,8 @@ async fn transient_fail_enters_backoff() {
     };
     let mut wd = Watchdog::new(d, MockProber(vec![ProbeVerdict::Alive]), cfg());
     wd.run_once().await;
-    assert_eq!(wd.snapshot().status, SessionStatus::Backoff);
-    assert_eq!(wd.snapshot().redial_attempts, 1);
+    assert_eq!(wd.view().status, SessionStatus::Backoff);
+    assert_eq!(wd.view().redial_attempts, 1);
 }
 
 #[tokio::test]
@@ -129,7 +129,7 @@ async fn double_probe_fail_drops() {
     );
     wd.run_once().await; // dial → Connected
     wd.run_once().await; // probe fail #1（复核，不 drop）
-    assert_eq!(wd.snapshot().status, SessionStatus::Connected);
+    assert_eq!(wd.view().status, SessionStatus::Connected);
     wd.run_once().await; // probe fail #2 → drop → redial
     assert_eq!(wd.dial_calls(), 2);
 }
@@ -153,7 +153,7 @@ async fn auth_fail_enters_slow_path() {
     }
     let mut wd = Watchdog::new(AuthDialer, MockProber(vec![ProbeVerdict::Alive]), cfg());
     let d = wd.run_once().await;
-    assert_eq!(wd.snapshot().status, SessionStatus::AuthFail);
+    assert_eq!(wd.view().status, SessionStatus::AuthFail);
     assert_eq!(d, Duration::from_secs(600));
 }
 
@@ -167,7 +167,7 @@ async fn request_redial_dials_immediately_in_connected() {
     wd.request_redial();
     wd.run_once().await; // 顶部消费标志 → hangup（会话仍活）→ do_dial
     assert_eq!(wd.dial_calls(), 2);
-    assert_eq!(wd.snapshot().status, SessionStatus::Connected);
+    assert_eq!(wd.view().status, SessionStatus::Connected);
     // 标志一次性：再 run_once 回到探测相位，不再拨号
     wd.run_once().await;
     assert_eq!(wd.dial_calls(), 2);
@@ -181,13 +181,10 @@ async fn request_redial_in_connected_hangups_live_session_first() {
     wd.request_redial();
     wd.run_once().await;
     // 语义修正：活会话必须先挂断再拨，否则二次 RasDial 失败入 Backoff 死循环
-    assert_eq!(wd.snapshot().status, SessionStatus::Connected);
-    assert_eq!(
-        wd.snapshot().last_drop_reason.as_deref(),
-        Some("Manual redial")
-    );
+    assert_eq!(wd.view().status, SessionStatus::Connected);
+    assert_eq!(wd.view().last_drop_reason.as_deref(), Some("Manual redial"));
     // do_dial 成功后 since 重置为新会话起点（record_drop 清理 → 成功再赋值）
-    assert!(wd.snapshot().since_unix.is_some());
+    assert!(wd.view().since_unix.is_some());
 }
 
 #[tokio::test]
@@ -198,13 +195,13 @@ async fn request_redial_in_backoff_preserves_attempts() {
     };
     let mut wd = Watchdog::new(d, MockProber(vec![ProbeVerdict::Alive]), cfg());
     wd.run_once().await; // 失败 → Backoff, attempts=1
-    assert_eq!(wd.snapshot().status, SessionStatus::Backoff);
+    assert_eq!(wd.view().status, SessionStatus::Backoff);
 
     wd.request_redial();
     wd.run_once().await; // 直接 do_dial 成功 → Connected（无活会话，不 hangup 路径）
-    assert_eq!(wd.snapshot().status, SessionStatus::Connected);
+    assert_eq!(wd.view().status, SessionStatus::Connected);
     // attempts 不因手动重拨清零（稳定 ≥300s 才重置）
-    assert_eq!(wd.snapshot().redial_attempts, 1);
+    assert_eq!(wd.view().redial_attempts, 1);
 }
 
 #[tokio::test]
@@ -215,32 +212,4 @@ async fn request_redial_without_flag_keeps_probing() {
     assert_eq!(wd.dial_calls(), 1);
     wd.run_once().await; // 正常探测，不再拨号
     assert_eq!(wd.dial_calls(), 1);
-}
-
-#[tokio::test]
-async fn view_matches_snapshot_wired_fields() {
-    let d = MockDialer {
-        fail_times: 1,
-        ..Default::default()
-    };
-    let mut wd = Watchdog::new(d, MockProber(vec![ProbeVerdict::Alive]), cfg());
-    wd.set_eth_link(Some(true));
-    wd.run_once().await; // 失败 → Backoff（last_drop_reason 非空）
-
-    let view = wd.view();
-    let snap = wd.snapshot();
-    assert_eq!(view.status, snap.status);
-    assert_eq!(view.since_unix, snap.since_unix);
-    assert_eq!(view.last_drop_reason, snap.last_drop_reason);
-    assert_eq!(view.redial_attempts, snap.redial_attempts);
-
-    // 成功会话：since_unix 也一致。
-    wd.run_once().await;
-    let view = wd.view();
-    let snap = wd.snapshot();
-    assert_eq!(view.status, SessionStatus::Connected);
-    assert_eq!(view.since_unix, snap.since_unix);
-    assert!(view.since_unix.is_some());
-    assert_eq!(view.last_drop_reason, snap.last_drop_reason);
-    assert_eq!(view.redial_attempts, snap.redial_attempts);
 }

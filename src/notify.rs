@@ -1,7 +1,7 @@
 //! 系统Toast 通知（tauri-winrt-notification）。
 //!
 //! 服务侧钩子调用 [`toast`]；节流（同一原因 30 分钟内不重复）由调用方
-//! （runtime 的 Notifier）负责，本模块保持无状态。
+//! （`supervisor` 的通知账本）负责，本模块保持无状态。
 //!
 //! 仅 Windows 编译，以 `cargo check --target x86_64-pc-windows-msvc` 验证。
 

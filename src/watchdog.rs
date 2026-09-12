@@ -4,16 +4,13 @@
 //! "Drop"以流量探测为准（不单看 RAS 状态）；`is_connected()==false`
 //! 是可靠的即时掉线信号（上游语义：668 连接不存在归 Disconnected）。
 
-use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
 
 use crate::backoff::Backoff;
-use crate::ipc::protocol::{
-    HeartbeatStatus, NetMode, SessionStatus, StateSnapshot, WirelessSnapshot,
-};
+use crate::ipc::protocol::SessionStatus;
 use crate::probe::ProbeVerdict;
 use crate::ras::ErrKind;
 
@@ -128,12 +125,7 @@ impl Watchdog {
         self.eth_link = up;
     }
 
-    /// 测试辅助/诊断：当前链路门控状态。
-    pub fn eth_link(&self) -> Option<bool> {
-        self.eth_link
-    }
-
-    /// 有线会话事实（组合层快照的单源；`snapshot()` 暂留到壳切换完成）。
+    /// 有线会话事实（组合层快照的单源）。
     pub fn view(&self) -> SessionView {
         SessionView {
             status: self.phase.into(),
@@ -142,21 +134,6 @@ impl Watchdog {
                 .map(|t| t.duration_since(UNIX_EPOCH).unwrap_or_default().as_secs()),
             last_drop_reason: self.last_drop_reason.clone(),
             redial_attempts: self.attempts,
-        }
-    }
-
-    pub fn snapshot(&self) -> StateSnapshot {
-        let v = self.view();
-        StateSnapshot {
-            status: v.status,
-            since_unix: v.since_unix,
-            ip: None,
-            last_drop_reason: v.last_drop_reason,
-            redial_attempts: v.redial_attempts,
-            heartbeat: HeartbeatStatus::Off,
-            mode: NetMode::default(),
-            wireless: WirelessSnapshot::default(),
-            events: VecDeque::new(),
         }
     }
 
