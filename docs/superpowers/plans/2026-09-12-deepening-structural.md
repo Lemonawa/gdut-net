@@ -367,7 +367,7 @@ impl Watchdog { pub fn view(&self) -> SessionView; }
 
 **Steps:**
 
-- [ ] **Step 1: 骨架**：`run()` 改为「构造 `Supervisor(cfg, pass, SystemClock)` + IPC server（`watch::channel(core.snapshot())`）+ 心跳 actor（现有装配逐字保留）+ 无线 worker 通道 + 主循环 select」；先不删旧 `wireless_manager`，两者并存过渡到绿。
+- [ ] **Step 1: 骨架**：`run()` 改为「构造 `Supervisor(cfg, SystemClock)` + IPC server（`watch::channel(core.snapshot())`）+ 心跳 actor（现有装配逐字保留）+ 无线 worker 通道 + 主循环 select」；先不删旧 `wireless_manager`，两者并存过渡到绿。
 - [ ] **Step 2: 执行器**：`apply_main(effect) -> Vec<Event>`（Windows 映射）：
   `StepWatchdog` → `watchdog.run_once().await`（独占）→ 采样 `adapter::ppp_adapter_ip()` → `WatchdogStepped{delay, view(), ppp_ip}`；
   `RequestRedial` → `watchdog.request_redial()`；`SetWatchdogLink` → `watchdog.set_eth_link(up)`；`Hangup` → `watchdog.shutdown().await`；
