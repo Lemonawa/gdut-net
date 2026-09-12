@@ -85,3 +85,48 @@ reg query "HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\gdut-net"
 | 22 | GUI 中文无方块 | 安装器与日常窗口全部中文可读，无 □（tofu）；系统字体 `msyh.ttc` 加载成功；人为断字体路径时应显示错误页而非静默方块 |
 | 23 | 关窗 = 隐藏 | 点日常窗口关闭 → 仅隐藏（进程/托盘不退）；左键托盘重新唤出并聚焦；右键原生中文菜单：打开主界面 / 有线优先 / 有线+无线备用 / 立即重拨 / 退出托盘 |
 | 24 | GUI 文件日志 | `C:\ProgramData\gdut-net\logs\` 出现 `tray_r*.log`（和 `setup_r*.log`）；GUI 进程崩溃不影响服务运行 |
+
+## 深挖结构波真机验收（2026-09-13，安装形态）
+
+新 runtime（supervisor 编排 + 双车道执行器，`95a3727`）在本机完整走查：
+
+| 项 | 结果 |
+|---|---|
+| 部署（`gdut-switch`，`--silent --keep-password`） | setup exit=0；75s 稳定 `http=204` |
+| 服务/托盘/IPC | Running/自启；托盘连上管道；`status` 全绿 |
+| 自动拨号 + 两级探测 | `Dial succeeded`；Probe Alive 周期正常 |
+| 手动重拨（IPC Redial） | `IPC command: manual redial` → ~2s 拨回，`Drop reason: Manual redial` |
+| 模式切换（exclusive ↔ standby） | 双向生效并落盘；standby 下 WLAN 认证成功、/32 路由 + metric 100 就位 |
+| 停服务清理 | /32 清空、metric 还原、WLAN Disconnected（三条出口） |
+| 物理拔线 → 无线接管 | 2s 发现；期间无任何 Dial（link gate）；≈14s portal Online |
+| 插回网线 → 恢复与让位 | `Ethernet link restored, redialing immediately` → 1.8s `Dial succeeded` → metric 还原 → WLAN 让位断开 |
+
+## 深挖两波遗留事项（deferred minors，2026-09-12）
+
+> 来源：两波深挖（机械波 + 结构波）逐任务评审；完整上下文在本地归档
+> `.superpowers/sdd/2026-09-12-deepening-{mechanical,structural}/progress.md`。
+> 全部为评审 Minor 级、已逐条判定"可延后"；标 ⚠️ 的三条修复价值最高。
+
+### 优先处理
+- ⚠️ `service.rs::rollback_install` 固定用缺省 `CONFIG_PATH`：CLI `gdut-net install --config <自定义>` 失败时，回滚会把服务注册指回缺省配置路径（旧 CLI 本无回滚，属新能力缺口）。修法：把 `req.cfg_path` 穿透进回滚。
+- ⚠️ `supervisor.rs` 的 `ppp_ip` 只在 `WatchdogStep` 时采样（旧 runtime 每次推快照都重读 `ppp_adapter_ip()`）：无线模式下快照 IP 最多滞后一个探测周期（~30s）。修法：`Wake`/无线节拍顺带刷新，或并入 `SampleLink` 结果。
+- ⚠️ `wireless/routes.rs::set_standby_metric` 在"释放失败后再次压制"时会用当前值覆盖 `saved_metric`，可能丢失原始 metric（两波之前既有的缺陷）。修法：`saved_metric.is_some()` 时只重试 apply、不重存原值。
+
+### 其余（清理 / 文档 / 测试）
+- `ipc/session.rs::send_and_confirm` 未在发送前校验 `max_frames >= 1`；帧预算耗尽时返回未命中谓词的帧（有文档、唯一调用方自检）。
+- `SyncSession` 未注明"仅限同步上下文"（现有调用点本就同步）。
+- `tray/mod.rs` AUMID 写入的 `RegCloseKey` 失败告警被简化掉（close 失败无实际意义）。
+- 卸载键现在 8 次 create/close 循环（安装期一次性，可忽略）。
+- `Unknown` 回滚文案沿用 "Service existed but its path was unreadable"，SCM 不可达时也会打这句（字符串被冻结）。
+- `setup/work.rs::label_zh` 兜底直接回显 key（当前固定 4 行不可能触发；增行时需补标签）。
+- 失败路径日志的模块路径从 `setup::work` 变为 `service`（文案相同）。
+- `supervisor.rs` 重拨失败 toast 的拔线豁免比旧逻辑多一条 `eth_link == Some(false)`（更保守，接受）。
+- 首次链路采样为 `None` 后再拔线会打 `Ethernet link down at startup`（仅措辞，接受）。
+- `WatchdogStepped` 无 in-flight 护栏（Main 车道 FIFO 前提下不可达）。
+- `supervisor.rs` 中 `self.cfg.wireless.mode` 的写入无人读取（死写）。
+- Stop 握手前 `LaneMsg::Shutdown` 的发送无超时（队列 ≤3/64，理论项）。
+- 无线配置无效时核心与壳各打一条 "manager disabled"（重复日志）。
+- 从 cmd 通道关闭退出时缺 `Stop signal received` 日志（行为更干净，仅日志口径）。
+- `runtime.rs::Shell` 与 `supervisor.rs` 各持一份 `Config`（目前只同步 `wireless.mode`；扩展时注意）。
+- `tests/status.rs` 未钉：`wphase_zh(Authing/Error)`、`session_zh(Idle)`、`heartbeat_en(Running)`、`(ip, error)` 优先级。
+- 既有（两波之前）：debug 构建 `gdut-net` 会触发 clap debug-assert panic（`password_stdin` 的 `requires = "cmd"` 无对应参数），release 与测试不受影响。
