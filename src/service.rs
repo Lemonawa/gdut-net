@@ -293,6 +293,8 @@ mod win {
     }
 
     /// 安装开始前的服务状态：回滚的唯一依据。
+    /// `NotInstalled` = 本次安装前无服务（失败时删除本次新建的服务）；
+    /// `Unknown` = 查询失败（不动注册、尽力启动）。
     pub fn capture_prev_service() -> PrevService {
         match install_state() {
             InstallState::Installed {
@@ -302,9 +304,9 @@ mod win {
             InstallState::Installed {
                 service_exe: None, ..
             } => PrevService::Unknown,
-            // 未安装与查询失败都按"不动注册、尽力启动"处理：查询失败时
-            // 误删真实服务的代价远高于漏回滚。
-            InstallState::NotInstalled | InstallState::Unknown => PrevService::Unknown,
+            InstallState::NotInstalled => PrevService::None,
+            // 查询失败（SCM 不可达）：误删真实服务的代价远高于漏回滚。
+            InstallState::Unknown => PrevService::Unknown,
         }
     }
 

@@ -186,7 +186,7 @@ impl UninstallReport {
 - [ ] **Step 2: 三态消费者显式化**
   - `tray/mod.rs::double_click_entry`：`NotInstalled | Unknown => { message_box_install_hint(); Ok(()) }`（与现状同 UX；注释说明 Unknown 走同一提示的原因：查询失败时给安装提示无害、给"已安装"误判更糟）。
   - `setup/ui.rs::new`：`Mode::Uninstall` 匹配 `Installed => UninstallConfirm, NotInstalled | Unknown => Maintenance`；默认匹配 `Installed | Unknown => Maintenance, NotInstalled => Welcome`。
-  - `setup/work.rs::capture_prev_service` 移入 `service.rs`：`Installed{Some(exe)} => Known(exe)`、`Installed{None} => Unknown`、`NotInstalled | Unknown => PrevService::Unknown`（查询失败按"不动注册、尽力启动"处理，与现有 `PrevService::Unknown` 的保守语义一致）。
+  - `setup/work.rs::capture_prev_service` 移入 `service.rs`：`Installed{Some(exe)} => Known(exe)`、`Installed{None} => Unknown`、`NotInstalled => None`、`Unknown => Unknown`（`NotInstalled` 必须映射为 `None`：全新安装失败时删除本次可能新建的服务，这是既有回滚语义；`Unknown` 按"不动注册、尽力启动"处理）。
 
 - [ ] **Step 3: 回滚提升**
   - 把 `PrevService`、`capture_prev_service`、`rollback_for`（改名 `rollback_install`）从 `setup/work.rs` 移入 `service.rs`（文案不变）。
