@@ -92,7 +92,7 @@ mod win {
         let mut client = PipeClient::connect()?;
         let s = client.next_state().await?;
 
-        println!("Status:     {}", s.status_text());
+        println!("Status:     {}", crate::status::session_en(s.status));
         println!("Uptime:   {}", s.uptime_text());
         println!("IP:       {}", s.ip.as_deref().unwrap_or("—"));
         println!(
@@ -100,9 +100,9 @@ mod win {
             s.last_drop_reason.as_deref().unwrap_or("—")
         );
         println!("Redial attempts: {}", s.redial_attempts);
-        println!("Heartbeat: {}", s.heartbeat_text());
-        println!("Mode:     {}", s.mode_text());
-        println!("Wireless: {}", s.wireless_text());
+        println!("Heartbeat: {}", crate::status::heartbeat_en(&s.heartbeat));
+        println!("Mode:     {}", crate::status::mode_en(s.mode));
+        println!("Wireless: {}", crate::status::wireless_en(&s.wireless));
         println!("Events:   {} recent", s.events.len());
         Ok(())
     }

@@ -436,7 +436,7 @@ pub fn spawn_start_service(tx: Sender<Ev>) {
                             step_done(
                                 &tx,
                                 STEP_WAIT_DIAL,
-                                &format!("等待拨号结果（{}）", s.status_text()),
+                                &format!("等待拨号结果（{}）", crate::status::session_en(s.status)),
                             );
                             return Ok(());
                         }

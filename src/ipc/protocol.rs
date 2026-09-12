@@ -67,18 +67,6 @@ pub struct StateSnapshot {
 }
 
 impl StateSnapshot {
-    /// 状态的中文描述（`status` 子命令与托盘共用）。
-    pub fn status_text(&self) -> String {
-        match self.status {
-            SessionStatus::Idle => "Idle",
-            SessionStatus::Dialing => "Dialing",
-            SessionStatus::Connected => "Connected",
-            SessionStatus::Backoff => "Backoff (retrying)",
-            SessionStatus::AuthFail => "Auth failed",
-        }
-        .to_string()
-    }
-
     /// 在线时长 `HH:MM:SS`（自 `since_unix` 起算）；无会话为 `—`。
     pub fn uptime_text(&self) -> String {
         self.since_unix.map_or_else(
@@ -91,39 +79,6 @@ impl StateSnapshot {
                 format_uptime(now.saturating_sub(t))
             },
         )
-    }
-
-    /// 心跳状态的中文描述。
-    pub fn heartbeat_text(&self) -> String {
-        match &self.heartbeat {
-            HeartbeatStatus::Off => "Off".to_string(),
-            HeartbeatStatus::Running => "Running".to_string(),
-            HeartbeatStatus::Error(e) => format!("Error ({e})"),
-        }
-    }
-
-    /// 模式英文描述（status/托盘共用）。
-    pub fn mode_text(&self) -> String {
-        match self.mode {
-            NetMode::WiredExclusive => "Wired only (auto wireless takeover)".to_string(),
-            NetMode::WiredPlusStandby => "Wired + wireless standby".to_string(),
-        }
-    }
-
-    /// 无线链路英文描述。
-    pub fn wireless_text(&self) -> String {
-        let phase = match self.wireless.phase {
-            WPhase::Off => "Off",
-            WPhase::Joining => "Joining",
-            WPhase::Authing => "Authenticating",
-            WPhase::Online => "Online",
-            WPhase::Error => "Error",
-        };
-        match (&self.wireless.ip, &self.wireless.last_error) {
-            (Some(ip), _) => format!("{phase} {ip}"),
-            (None, Some(e)) => format!("{phase} ({e})"),
-            _ => phase.to_string(),
-        }
     }
 }
 

@@ -28,7 +28,8 @@ use windows::Win32::System::Registry::{
 use windows::Win32::System::Threading::{CreateEventW, INFINITE};
 
 use crate::ipc::client::PipeClient;
-use crate::ipc::protocol::{Command, NetMode, SessionStatus, StateSnapshot, WPhase};
+use crate::ipc::protocol::{Command, NetMode, StateSnapshot};
+use crate::status::Light;
 
 use gui::{GuiShared, GuiState};
 
@@ -194,22 +195,13 @@ impl IconKind {
     }
 }
 
-/// 从快照推图标语义：有线 Connected 优先绿灯（standby 有线健康时也显示有线在
-/// 用，spec §8）；有线不在线才轮到无线 Online 蓝灯；无快照视为掉线灰灯。
+/// 从快照推图标语义：判定在 `crate::status`，本函数只做图标适配。
 fn icon_kind(s: Option<&StateSnapshot>) -> IconKind {
-    match s {
-        None => IconKind::Down,
-        Some(s) if s.wireless.phase == WPhase::Online => match s.status {
-            SessionStatus::Connected => IconKind::WiredUp,
-            _ => IconKind::WirelessUp,
-        },
-        Some(s) => match s.status {
-            SessionStatus::Connected => IconKind::WiredUp,
-            SessionStatus::Backoff | SessionStatus::AuthFail | SessionStatus::Dialing => {
-                IconKind::Backoff
-            }
-            SessionStatus::Idle => IconKind::Down,
-        },
+    match crate::status::view(s).light {
+        Light::Wired => IconKind::WiredUp,
+        Light::Wireless => IconKind::WirelessUp,
+        Light::Busy => IconKind::Backoff,
+        Light::Off => IconKind::Down,
     }
 }
 
@@ -219,31 +211,6 @@ fn icon_for(icons: &[tray_icon::Icon], kind: IconKind) -> Option<&tray_icon::Ico
         .iter()
         .position(|k| *k == kind)
         .and_then(|idx| icons.get(idx))
-}
-
-/// 托盘状态行（菜单首项 + tooltip 共用）：None = 无快照按"服务未运行"。
-///
-/// 中文只覆盖 GUI 呈现（托盘/窗口）；CLI 的英文输出在
-/// `ipc::protocol::StateSnapshot` 的 `*_text()`，协议层不动。
-fn status_line(s: Option<&StateSnapshot>) -> String {
-    let Some(s) = s else {
-        return "服务未运行".to_string();
-    };
-    let wired = match s.status {
-        SessionStatus::Connected => "已连接",
-        SessionStatus::Dialing => "拨号中",
-        SessionStatus::Backoff => "重拨中",
-        SessionStatus::AuthFail => "认证失败",
-        SessionStatus::Idle => "空闲",
-    };
-    let wifi = match s.wireless.phase {
-        WPhase::Off => "关闭",
-        WPhase::Joining => "连接中",
-        WPhase::Authing => "认证中",
-        WPhase::Online => "已接管",
-        WPhase::Error => "错误",
-    };
-    format!("有线：{wired} · WiFi：{wifi}")
 }
 
 /// 注册 AUMID（HKCU\Software\Classes\AppUserModelId\gdut-net，默认值
@@ -385,7 +352,7 @@ pub fn run_tray(show_gui_at_start: bool) -> Result<()> {
 
     // 菜单在主线程创建；后台线程只经通道送状态文本。
     // 面孔中文（GUI 场景用户可见）；CLI 输出保持英文。
-    let status_item = MenuItem::new(status_line(None), false, None);
+    let status_item = MenuItem::new(crate::status::status_line_zh(None), false, None);
     let sep1 = PredefinedMenuItem::separator();
     let mode_exclusive = CheckMenuItem::new("有线优先（自动无线接管）", true, true, None);
     let mode_standby = CheckMenuItem::new("有线 + 无线备用", true, false, None);
@@ -421,7 +388,10 @@ pub fn run_tray(show_gui_at_start: bool) -> Result<()> {
     // win32 消息循环），主线程天然满足。`tray` 必须保活：drop 会移除托盘
     // 图标。
     let tray = tray_icon::TrayIconBuilder::new()
-        .with_tooltip(format!("gdut-net — {}", status_line(None)))
+        .with_tooltip(format!(
+            "gdut-net — {}",
+            crate::status::status_line_zh(None)
+        ))
         .with_icon(
             icon_for(&icons, IconKind::Down)
                 .cloned()
@@ -433,7 +403,7 @@ pub fn run_tray(show_gui_at_start: bool) -> Result<()> {
         .build()
         .map_err(|e| anyhow!("Failed to create tray icon: {e}"))?;
     let mut last_kind = IconKind::Down;
-    let mut last_tooltip = status_line(None);
+    let mut last_tooltip = crate::status::status_line_zh(None);
 
     // IPC 线程 → 泵线程：状态文本；面板点击重拨也汇聚到泵线程统一发，
     // 避免两处并发建 PipeClient。
@@ -517,7 +487,7 @@ pub fn run_tray(show_gui_at_start: bool) -> Result<()> {
         // 快照缓存兜底刷新（文本通道丢消息时也能收敛）：状态行、模式勾选、
         // tooltip、图标，都是变了才 set（幂等，且避免每拍 syscall 抖动）。
         if let Ok(guard) = snapshot.lock() {
-            let want_status = status_line(guard.as_ref());
+            let want_status = crate::status::status_line_zh(guard.as_ref());
             if status_item.text() != want_status {
                 status_item.set_text(&want_status);
             }
@@ -576,7 +546,10 @@ fn send_cmd_logged(what: &str, cmd: Command) {
 /// toast 后重试。所有 MenuItem 操作由泵线程完成，本线程不碰 muda。
 fn ipc_loop(snapshot: SharedSnapshot, status_tx: mpsc::Sender<String>) {
     let push_text = |snapshot: &SharedSnapshot| {
-        let text = snapshot.lock().ok().map(|g| status_line(g.as_ref()));
+        let text = snapshot
+            .lock()
+            .ok()
+            .map(|g| crate::status::status_line_zh(g.as_ref()));
         if let Some(text) = text {
             let _ = status_tx.send(text);
         }

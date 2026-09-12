@@ -153,7 +153,7 @@ fn wireless_set_mode(mode: NetMode) -> Result<()> {
             for _ in 0..5 {
                 let s = client.next_state().await?;
                 if s.mode == mode {
-                    println!("Mode set: {}", s.mode_text());
+                    println!("Mode set: {}", crate::status::mode_en(s.mode));
                     return Ok(());
                 }
             }

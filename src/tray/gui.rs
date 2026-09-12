@@ -13,7 +13,8 @@ use eframe::egui;
 use eframe::egui::ViewportBuilder;
 use eframe::{NativeOptions, Renderer};
 
-use crate::ipc::protocol::{HeartbeatStatus, NetMode, SessionStatus, StateSnapshot, WPhase};
+use crate::ipc::protocol::{HeartbeatStatus, NetMode, StateSnapshot};
+use crate::status::Primary;
 
 use super::SharedSnapshot;
 
@@ -337,72 +338,29 @@ struct StatusView {
     egress: &'static str,
 }
 
-/// 状态 → 呈现。优先级：有线已连接 > 无线已接管 > 有线进行中/失败/空闲。
+/// 状态 → 呈现。词与出口的判定在 `crate::status`，本函数只做色板映射。
 fn status_view(s: Option<&StateSnapshot>) -> StatusView {
-    let Some(s) = s else {
-        return StatusView {
-            word: "服务未运行",
-            stamp_fill: VERMILION,
-            stamp_ink: PAPER_WHITE,
-            word_color: VERMILION,
-            light: None,
-            egress: "—",
-        };
-    };
-    if s.status == SessionStatus::Connected {
-        return StatusView {
-            word: "已连接",
-            stamp_fill: READER_GREEN,
+    let v = crate::status::view(s);
+    let (stamp_fill, stamp_ink, word_color, light) = match v.primary {
+        Primary::ServiceDown => (VERMILION, PAPER_WHITE, VERMILION, None),
+        Primary::Connected | Primary::WirelessOnline => {
             // 绿底上用墨色章字：白字对读卡绿只有 3.4:1，墨字 6.5:1。
-            stamp_ink: INK_BLACK,
-            word_color: READER_GREEN,
-            light: Some(READER_GREEN),
-            egress: "有线",
-        };
-    }
-    if s.wireless.phase == WPhase::Online {
-        return StatusView {
-            word: "无线接管",
-            stamp_fill: READER_GREEN,
-            stamp_ink: INK_BLACK,
-            word_color: READER_GREEN,
-            light: Some(READER_GREEN),
-            egress: "无线",
-        };
-    }
-    let (word, fill, ink, color, light) = match s.status {
-        SessionStatus::Dialing => (
-            "拨号中",
-            INK_BLACK,
-            PAPER_WHITE,
-            INK_BLACK,
-            Some(PAPER_WHITE),
-        ),
-        SessionStatus::Backoff => (
-            "重拨中",
-            INK_BLACK,
-            PAPER_WHITE,
-            INK_BLACK,
-            Some(PAPER_WHITE),
-        ),
-        SessionStatus::AuthFail => (
-            "认证失败",
-            VERMILION,
-            PAPER_WHITE,
-            VERMILION,
-            Some(VERMILION),
-        ),
+            (READER_GREEN, INK_BLACK, READER_GREEN, Some(READER_GREEN))
+        }
+        Primary::Dialing | Primary::Backoff => {
+            (INK_BLACK, PAPER_WHITE, INK_BLACK, Some(PAPER_WHITE))
+        }
+        Primary::AuthFail => (VERMILION, PAPER_WHITE, VERMILION, Some(VERMILION)),
         // 空闲：空白章（纸面 + 墨字），像一张未启用的卡。
-        SessionStatus::Idle => ("空闲", PAPER_WHITE, INK_BLACK, INK_BLACK, None),
-        SessionStatus::Connected => unreachable!("connected handled above"),
+        Primary::Idle => (PAPER_WHITE, INK_BLACK, INK_BLACK, None),
     };
     StatusView {
-        word,
-        stamp_fill: fill,
-        stamp_ink: ink,
-        word_color: color,
+        word: v.primary.word_zh(),
+        stamp_fill,
+        stamp_ink,
+        word_color,
         light,
-        egress: "—",
+        egress: v.primary.egress_zh(),
     }
 }
 
@@ -663,13 +621,7 @@ fn field_rows(ui: &mut egui::Ui, s: &StateSnapshot) {
 
 /// 无线字段的中文短语（含 IP / 错误）。
 fn wireless_zh(s: &StateSnapshot) -> String {
-    let phase = match s.wireless.phase {
-        WPhase::Off => "关闭",
-        WPhase::Joining => "连接中",
-        WPhase::Authing => "认证中",
-        WPhase::Online => "已接管",
-        WPhase::Error => "错误",
-    };
+    let phase = crate::status::wphase_zh(s.wireless.phase);
     match (&s.wireless.ip, &s.wireless.last_error) {
         (Some(ip), _) => format!("{phase} {ip}"),
         (None, Some(e)) => format!("{phase}（{e}）"),
@@ -864,7 +816,7 @@ fn open_logs() {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ipc::protocol::WirelessSnapshot;
+    use crate::ipc::protocol::{SessionStatus, WPhase, WirelessSnapshot};
 
     fn snap(status: SessionStatus, phase: WPhase) -> StateSnapshot {
         StateSnapshot {

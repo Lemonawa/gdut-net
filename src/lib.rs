@@ -26,6 +26,7 @@ pub mod setup_args;
 #[cfg(windows)]
 pub mod shell;
 pub mod shell_shortcuts;
+pub mod status;
 #[cfg(windows)]
 pub mod tray;
 pub mod watchdog;
