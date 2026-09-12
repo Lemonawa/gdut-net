@@ -4,8 +4,6 @@
 
 #[cfg(windows)]
 mod win {
-    use std::path::Path;
-
     use anyhow::{Context, Result};
     use windows::core::PCWSTR;
     use windows::Win32::Foundation::{ERROR_FILE_NOT_FOUND, ERROR_SUCCESS};
@@ -165,17 +163,9 @@ mod win {
             let _ = unsafe { DeregisterEventSource(self.handle) };
         }
     }
-
-    /// 确保目录存在（service_main 初始化日志目录用）。
-    pub fn ensure_dir(path: &Path) -> Result<()> {
-        std::fs::create_dir_all(path)
-            .with_context(|| format!("Failed to create directory: {}", path.display()))
-    }
 }
 
 #[cfg(windows)]
-pub use win::{
-    ensure_dir, register_source, unregister_source, EventLevel, EventLog, SOURCE_SUBKEY,
-};
+pub use win::{register_source, unregister_source, EventLevel, EventLog, SOURCE_SUBKEY};
 
 pub const EVENT_SOURCE_NAME: &str = "gdut-net";

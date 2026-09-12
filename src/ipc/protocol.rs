@@ -91,7 +91,6 @@ pub fn format_uptime(secs: u64) -> String {
 #[serde(tag = "t", rename_all = "snake_case")]
 pub enum ServerMsg {
     State { state: StateSnapshot },
-    Ack,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

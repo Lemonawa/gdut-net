@@ -51,14 +51,13 @@ mod win {
                 .with_context(|| format!("Failed to connect to {PIPE_NAME} (service not running?)"))
         }
 
-        /// 读一帧 `ServerMsg::State` 并返回快照。Ack 或非法帧跳过继续读。
+        /// 读一帧 `ServerMsg::State` 并返回快照。非法帧跳过继续读。
         pub async fn next_state(&mut self) -> Result<StateSnapshot> {
             loop {
                 // 先吃缓冲里已有的完整帧。
                 while let Some(frame) = self.buf.pop_front() {
                     match serde_json::from_slice::<ServerMsg>(&frame) {
                         Ok(ServerMsg::State { state }) => return Ok(state),
-                        Ok(ServerMsg::Ack) => continue,
                         Err(e) => log::debug!("Ignoring invalid server frame: {e}"),
                     }
                 }

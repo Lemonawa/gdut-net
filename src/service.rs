@@ -54,7 +54,6 @@ mod win {
     }
 
     pub struct InstallOutcome {
-        pub student_id: String,
         pub cfg_path: PathBuf,
         /// true = 服务已存在、配置被刷新（CLI 回显旧行）；false = 新建。
         pub service_refreshed: bool,
@@ -208,7 +207,6 @@ mod win {
         }
         crate::tray::register_autostart(&req.tray_exe)?;
         Ok(InstallOutcome {
-            student_id: cfg.account.student_id.clone(),
             cfg_path: req.cfg_path,
             service_refreshed,
         })
