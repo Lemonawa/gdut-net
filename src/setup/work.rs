@@ -409,13 +409,7 @@ fn outcome_of(step: service::Step) -> StepOutcome {
 
 /// 读一次服务快照（启动服务页显示拨号结果用）。
 pub fn query_status_once() -> Result<crate::ipc::protocol::StateSnapshot> {
-    let rt = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()?;
-    rt.block_on(async {
-        let mut client = crate::ipc::client::PipeClient::connect()?;
-        client.next_state().await
-    })
+    crate::ipc::session::status_snapshot()
 }
 
 /// 启动服务并等待连接（≤25s），结果经 Ev 回报。

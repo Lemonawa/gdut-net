@@ -34,7 +34,7 @@ mod win {
         mut snapshot_rx: watch::Receiver<StateSnapshot>,
         cmd_tx: mpsc::Sender<Command>,
     ) {
-        // 连接即推当前快照（客户端 connect 后第一个 next_state 立即返回）。
+        // 连接即推当前快照（客户端 connect 后第一个 next_snapshot 立即返回）。
         {
             let snap = snapshot_rx.borrow().clone();
             let frame = encode_frame(&ServerMsg::State { state: snap });

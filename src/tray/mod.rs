@@ -8,8 +8,9 @@
 //! muda 的 MenuItem 内含 Rc，不可跨线程。后台 IPC 线程只经 std mpsc
 //! 发送"status text to display"，泵线程每拍取来应用到菜单项。
 //!
-//! PipeClient 的 async 方法由每次调用自建的极小 current_thread runtime
-//! 驱动——托盘线程没有全局 tokio executor，不能假设 runtime 存在。
+//! IPC 会话（`ipc::session`）的 async 方法由自建 current_thread runtime
+//! 驱动——托盘线程没有全局 tokio executor，不能假设 runtime 存在；
+//! `SyncSession` 每次自建，`ipc_loop` 整条回路复用一个。
 
 mod gui;
 
@@ -26,8 +27,8 @@ use windows::Win32::System::Registry::{
 };
 use windows::Win32::System::Threading::{CreateEventW, INFINITE};
 
-use crate::ipc::client::PipeClient;
 use crate::ipc::protocol::{Command, NetMode, StateSnapshot};
+use crate::ipc::session::{Session, SyncSession};
 use crate::status::Light;
 use crate::win32::{reg, wide};
 
@@ -326,7 +327,7 @@ pub fn run_tray(show_gui_at_start: bool) -> Result<()> {
     let mut last_tooltip = crate::status::status_line_zh(None);
 
     // IPC 线程 → 泵线程：状态文本；面板点击重拨也汇聚到泵线程统一发，
-    // 避免两处并发建 PipeClient。
+    // 避免两处并发建 IPC 会话。
     let (status_tx, status_rx) = mpsc::channel::<String>();
     let (panel_redial_tx, panel_redial_rx) = mpsc::channel::<()>();
     let (panel_setmode_tx, panel_setmode_rx) = mpsc::channel::<NetMode>();
@@ -445,18 +446,9 @@ fn send_set_mode(mode: NetMode) {
     send_cmd_logged("set mode", Command::SetMode { mode });
 }
 
-/// 单次命令发送：current_thread runtime + 连管道 + 发帧，失败只记日志。
+/// 单次命令发送：`SyncSession` 自建 runtime + 连管道 + 发帧，失败只记日志。
 fn send_cmd_logged(what: &str, cmd: Command) {
-    let result = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .map_err(anyhow::Error::from)
-        .and_then(|rt| {
-            rt.block_on(async {
-                let mut c = PipeClient::connect()?;
-                c.send_cmd(cmd).await
-            })
-        });
+    let result = SyncSession::connect().and_then(|mut session| session.send(cmd));
     if let Err(e) = result {
         log::warn!("Failed to send {what} command: {e:#}");
     }
@@ -477,15 +469,14 @@ fn ipc_loop(snapshot: SharedSnapshot, status_tx: mpsc::Sender<String>) {
 
     // 托盘线程无全局 runtime，NamedPipeClient::open 要求 Handle::current()
     // 必须在 runtime 上下文内（tokio-1.53 named_pipe.rs:1005）。整条 IPC
-    // 回路复用同一个 current_thread runtime，避免每次建 runtime 且让
-    // PipeClient::connect 的 std::thread::sleep 不阻塞全局。
+    // 回路复用同一个 current_thread runtime，避免每次建 runtime。
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
         .expect("Failed to create tray IPC runtime");
 
     loop {
-        let mut client = match rt.block_on(async { PipeClient::connect() }) {
+        let mut client = match rt.block_on(Session::connect()) {
             Ok(c) => c,
             Err(e) => {
                 log::debug!("Tray failed to connect to service (retrying): {e:#}");
@@ -495,7 +486,7 @@ fn ipc_loop(snapshot: SharedSnapshot, status_tx: mpsc::Sender<String>) {
         };
 
         loop {
-            let state = match rt.block_on(client.next_state()) {
+            let state = match rt.block_on(client.next_snapshot()) {
                 Ok(s) => s,
                 Err(e) => {
                     log::debug!("Tray status stream disconnected (service stopped?): {e:#}");

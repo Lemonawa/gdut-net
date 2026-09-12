@@ -1,5 +1,5 @@
 #[cfg(windows)]
-use crate::ipc::protocol::{Command, NetMode};
+use crate::ipc::protocol::{NetMode, StateSnapshot};
 #[cfg(not(windows))]
 use anyhow::bail;
 use anyhow::Result;
@@ -101,10 +101,11 @@ pub fn dispatch() -> Result<()> {
         #[cfg(not(windows))]
         Cmd::Uninstall { purge: _ } => bail!("uninstall is only supported on Windows"),
         #[cfg(windows)]
-        Cmd::Status => tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()?
-            .block_on(crate::ipc::client::status_once()),
+        Cmd::Status => {
+            let s = crate::ipc::session::status_snapshot()?;
+            print_status(&s);
+            Ok(())
+        }
         #[cfg(not(windows))]
         Cmd::Status => bail!("status is only supported on Windows"),
         #[cfg(windows)]
@@ -132,31 +133,27 @@ pub fn dispatch() -> Result<()> {
     }
 }
 
-/// Build a current-thread runtime, connect to the service pipe, send one
-/// SetMode command, then read state snapshots until the service confirms
-/// the new mode.
+/// 打印一帧 `status` 快照（词表来自 `crate::status`，布局逐字冻结）。
+#[cfg(windows)]
+fn print_status(s: &StateSnapshot) {
+    println!("Status:     {}", crate::status::session_en(s.status));
+    println!("Uptime:   {}", s.uptime_text());
+    println!("IP:       {}", s.ip.as_deref().unwrap_or("—"));
+    println!(
+        "Drop reason: {}",
+        s.last_drop_reason.as_deref().unwrap_or("—")
+    );
+    println!("Redial attempts: {}", s.redial_attempts);
+    println!("Heartbeat: {}", crate::status::heartbeat_en(&s.heartbeat));
+    println!("Mode:     {}", crate::status::mode_en(s.mode));
+    println!("Wireless: {}", crate::status::wireless_en(&s.wireless));
+    println!("Events:   {} recent", s.events.len());
+}
+
+/// Switch the service mode and print the mode the service confirmed.
 #[cfg(windows)]
 fn wireless_set_mode(mode: NetMode) -> Result<()> {
-    tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()?
-        .block_on(async {
-            let mut client = crate::ipc::client::PipeClient::connect()?;
-            // The server pushes a snapshot immediately on connect (pre-command
-            // mode): consume it first or the confirmation would print the old
-            // mode.
-            client.next_state().await?;
-            client.send_cmd(Command::SetMode { mode }).await?;
-            // Wait for the post-command broadcast; intermediate frames may be
-            // periodic main-loop pushes still carrying the old mode, so read
-            // up to 5 snapshots until the requested one shows up.
-            for _ in 0..5 {
-                let s = client.next_state().await?;
-                if s.mode == mode {
-                    println!("Mode set: {}", crate::status::mode_en(s.mode));
-                    return Ok(());
-                }
-            }
-            anyhow::bail!("Service did not confirm mode switch (check `status` output)");
-        })
+    let s = crate::ipc::session::set_mode_confirmed(mode)?;
+    println!("Mode set: {}", crate::status::mode_en(s.mode));
+    Ok(())
 }
