@@ -6,28 +6,30 @@
 //! ```text
 //! Config ──► crypto::unprotect(密码)
 //!        ├─► RealDialer（ras::dial / RasSession）─┐
-//!        ├─► RealProber（adapter 刷新 + probe_once）─┤─► Watchdog.run_once 循环
-//!        ├─► watch::<StateSnapshot>（IPC status/托盘消费）
-//!        ├─► wireless manager（wireless.enabled 时 spawn）：Brain 决策循环，
-//!            执行 WLAN 关联 / eportal 认证 / 探测 / 路由与 metric（ADR-0005）
-//!        └─► heartbeat::session::run_blocking（spawn_blocking 内运行，
+//!        ├─► RealProber（adapter 刷新 + probe_once）─┤─► Supervisor（Task 8 纯核心）
+//!        ├─► watch::<StateSnapshot>（IPC status/托盘消费；唯一发布点）
+//!        ├─► 无线 lane worker（wireless.enabled 时 spawn）：串行执行
+//!        │     Supervisor 的 Wireless 车道效果（路由/metric/关联/认证/探测）
+//!        └─► heartbeat::session::run_blocking（spawn_blocking 内运行；
 //!            enabled 时；装配失败 60s 循环重试）
-//! stop.cancelled() ─► 退出循环 → hangup
 //! ```
+//!
+//! 主循环是薄执行器：事件喂 `Supervisor::on` → Main 效果内联执行、结果事件
+//! FIFO 回灌 → Wireless 效果送 worker。睡眠只依据 `Reaction.wake_at`（绝对
+//! 时刻，不被事件切碎）；快照只在 `Reaction.snapshot == Some` 时经唯一
+//! `snap_tx.send` 发布（I2）。停止握手：Stop 反应 → Hangup 内联（不可取消）
+//! → worker 收 `Shutdown`（teardown 效果不可取消）→ 等 worker 退出。
 //!
 //! 仅 Windows 编译，以 `cargo check --target x86_64-pc-windows-msvc` 验证。
 
 #[cfg(windows)]
 mod win {
-    use std::collections::HashMap;
+    use std::collections::VecDeque;
     use std::net::Ipv4Addr;
     use std::path::PathBuf;
     use std::time::Duration;
-    use std::time::Instant;
-    use std::time::SystemTime;
-    use std::time::UNIX_EPOCH;
 
-    use anyhow::{anyhow, bail, Context, Result};
+    use anyhow::{bail, Context, Result};
     use tokio::sync::{mpsc, watch};
     use tokio::time::sleep;
     use tokio_util::sync::CancellationToken;
@@ -36,30 +38,22 @@ mod win {
     use crate::backoff::AUTH_FAIL_DELAY;
     use crate::config::Config;
     use crate::heartbeat::session;
-    use crate::ipc::protocol::{
-        Command, EventLog, HeartbeatStatus, NetMode, SessionStatus, StateSnapshot, WPhase,
-        WirelessSnapshot,
-    };
+    use crate::ipc::protocol::{Command, HeartbeatStatus, StateSnapshot};
     use crate::ipc::server;
-    use crate::probe::{probe_once, ProbeVerdict};
+    use crate::probe;
+    use crate::supervisor::{
+        Clock, Effect, Event, Lane, Supervisor, SystemClock, WatchdogStep, WirelessSample,
+        WlanSample,
+    };
     use crate::watchdog::{DialError, Dialer, Prober, Watchdog, WatchdogCfg};
-    use crate::wireless::portal::{self, PortalResult};
-    use crate::wireless::routes;
+    use crate::wireless::routes::{self, RouteGuard};
     use crate::wireless::wlan;
-    use crate::wireless::{Action, Brain, World, JOIN_TIMEOUT_SECS};
     use crate::{crypto, notify, ras};
 
     /// 心跳装配失败后的重试间隔。
     const HEARTBEAT_RETRY_DELAY: Duration = Duration::from_secs(60);
-    /// 连续重拨失败多久后弹 Toast（未恢复即持续失败）。
-    const REDIAL_FAILING_TOAST_AFTER: Duration = Duration::from_secs(600);
-    /// 同一原因 Toast 的最小间隔。
-    const NOTIFY_THROTTLE: Duration = Duration::from_secs(30 * 60);
-    /// 单次 eportal 认证墙钟上限：portal_get 内部虽有 3s 级超时，但整体
-    /// 兜底防挂死会话把 Brain 卡在 Authing（T4 review carry-forward）。
-    // 真机（2026-09-10）：绑源 SYN 偶发被丢，单次 socket 尝试含 8s 超时 +
-    // SYN 重传；10s 外层兜底改 20s 给足重传余量（Brain 侧还有 5/15/30 退避）。
-    const PORTAL_AUTH_TIMEOUT: Duration = Duration::from_secs(20);
+    /// 停止时等待无线 worker 退出的上限（runtime.shutdown_timeout 的前置礼貌）。
+    const WORKER_EXIT_TIMEOUT: Duration = Duration::from_secs(5);
 
     /// RasSession 句柄包装：HRASCONN 是不透明指针（*mut c_void），Win32 RAS
     /// 句柄不线程亲和，单一所有者顺序使用下跨线程移动安全。
@@ -205,7 +199,7 @@ mod win {
     impl Prober for RealProber {
         async fn probe(&mut self) -> crate::probe::ProbeVerdict {
             match self.resolve_adapter() {
-                Ok(a) => probe_once(a.ipv4, a.gateway, &self.http_url).await,
+                Ok(a) => probe::probe_once(a.ipv4, a.gateway, &self.http_url).await,
                 Err(e) => {
                     log::warn!("Failed to resolve adapter before probe: {e:#}");
                     crate::probe::ProbeVerdict::LinkDown
@@ -214,274 +208,204 @@ mod win {
         }
     }
 
-    /// Toast 节流器：同一原因 30 分钟内不重复。
-    struct Notifier {
-        last: HashMap<String, Instant>,
+    /// 无线 lane 消息：效果串行执行；`Shutdown` 携带 Stop 反应的 teardown
+    /// 效果（不可取消），执行完 worker 退出。
+    enum LaneMsg {
+        Effect(Effect),
+        Shutdown(Vec<Effect>),
     }
 
-    impl Notifier {
-        fn new() -> Self {
-            Self {
-                last: HashMap::new(),
-            }
-        }
-
-        /// 节流通过则弹 Toast，成功才记录节流 Instant（失败不占用节流窗口，
-        /// 下次仍会尝试）；toast 失败只记日志（通知不可用不中断服务）。
-        fn fire(&mut self, key: &str, title: &str, body: &str) {
-            if let Some(t) = self.last.get(key) {
-                if t.elapsed() < NOTIFY_THROTTLE {
-                    return;
-                }
-            }
-            log::info!("Toast [{key}]: {title} — {body}");
-            match notify::toast(title, body) {
-                Ok(()) => {
-                    self.last.insert(key.to_string(), Instant::now());
-                }
-                Err(e) => {
-                    log::warn!("Toast failed (ignored): {e:#}");
-                }
-            }
-        }
+    /// 无线接管执行体（ADR-0005）：串行执行 Supervisor 的无线车道效果。
+    /// 决策正确性由 `Supervisor` 纯逻辑测试背书；本 worker 只做采信执行。
+    struct WirelessWorker {
+        portal_ip: Ipv4Addr,
+        probe_ip: Ipv4Addr,
+        guard: RouteGuard,
     }
 
-    /// 当前 UNIX 秒（事件环时间戳；时钟回拨/溢出按 0 兜底）。
-    fn unix_now() -> u64 {
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs()
-    }
-
-    /// 模式英文短名（事件环与日志用；完整描述见 StateSnapshot::mode_text）。
-    fn mode_text(m: NetMode) -> &'static str {
-        match m {
-            NetMode::WiredExclusive => "wired-exclusive",
-            NetMode::WiredPlusStandby => "wired-plus-standby",
-        }
-    }
-
-    /// wireless manager 专属配置快照（主循环持 Config 原件做持久化）。
-    struct ManagerCfg {
-        profile: String,
-        portal_url: String,
-        wlan_ac_ip: String,
-        probe_host: String,
-        user: String,
-        pass: String,
-        takeover_after: u64,
-        release_after: u64,
-        probe_interval: u64,
-        standby_metric: u32,
-    }
-
-    /// 无线接管执行体（ADR-0005）：2s 一拍采集 World → Brain 决策 → 执行动作。
-    /// 决策正确性由 Task 4 的 Brain 纯逻辑测试背书；本函数只做采信执行。
-    async fn wireless_manager(
-        cfg: ManagerCfg,
-        stop: CancellationToken,
-        mut mode_rx: watch::Receiver<NetMode>,
-        mut wired_rx: watch::Receiver<bool>,
-        wl_tx: watch::Sender<WirelessSnapshot>,
-        ev_tx: mpsc::Sender<String>,
-    ) {
-        let start = Instant::now();
-        let now = || start.elapsed().as_secs();
-        // config::validate 已保证二者可解析；此处仍容错返回（配置可被手改）。
-        let portal_ip = crate::probe::parse_http_probe_target(&cfg.portal_url).map(|(ip, _)| ip);
-        let probe_ip: Option<Ipv4Addr> = cfg.probe_host.parse().ok();
-        let (portal_ip, probe_ip) = match (portal_ip, probe_ip) {
-            (Some(p), Some(q)) => (p, q),
-            _ => {
-                log::error!("Wireless: portal_url/probe_host invalid, manager disabled");
-                return;
-            }
-        };
-        routes::cleanup_stale(&[portal_ip, probe_ip]);
-        let mut brain = Brain::new(
-            *mode_rx.borrow_and_update(),
-            cfg.takeover_after,
-            cfg.release_after,
-            cfg.probe_interval,
-        );
-        let mut guard = routes::RouteGuard::new();
-        let mut join_since: Option<u64> = None;
-        let mut verdict: Option<ProbeVerdict> = None;
-        log::info!(
-            "Wireless manager started (mode {:?}, portal {portal_ip}, probe {probe_ip})",
-            *mode_rx.borrow()
-        );
-        let ev = |tx: &mpsc::Sender<String>, msg: &str| {
-            let _ = tx.try_send(msg.to_string());
-        };
-        loop {
-            if stop.is_cancelled() {
-                break;
-            }
-            brain.set_mode(*mode_rx.borrow_and_update());
-            let (eth_up, assoc, wlan) = tokio::task::spawn_blocking(|| {
-                (
-                    adapter::ethernet_link_up(),
-                    wlan::associated(),
-                    adapter::wlan_adapter(),
-                )
-            })
-            .await
-            .unwrap_or((None, false, None));
-            let world = World {
-                now: now(),
-                // 无以太网卡（None）也按"链路不可用"处理：接管无线是唯一出路。
-                eth_link_up: eth_up.unwrap_or(false),
-                wired_connected: *wired_rx.borrow_and_update(),
-                wlan_associated: assoc,
-                wlan_ip: wlan.is_some(),
-                probe: verdict,
+    impl WirelessWorker {
+        /// 解析 portal/probe 目标；与 `Supervisor::new` 同一判定（配置可被手改）。
+        fn new(cfg: &Config) -> Result<Self> {
+            let portal_ip =
+                probe::parse_http_probe_target(&cfg.wireless.portal_url).map(|(ip, _)| ip);
+            let probe_ip: Option<Ipv4Addr> = cfg.wireless.probe_host.parse().ok();
+            let (Some(portal_ip), Some(probe_ip)) = (portal_ip, probe_ip) else {
+                bail!("Wireless: portal_url/probe_host invalid, manager disabled");
             };
-            match brain.decide(&world) {
-                Action::None => {}
-                Action::Associate => {
-                    ev(&ev_tx, "Wireless: associating to campus SSID");
-                    let p = cfg.profile.clone();
-                    // 长 await 必须与 stop 竞争：服务停止时从 await 点直接
-                    // break，循环后的收尾（路由/metric/断开）才会执行。
-                    let joined = tokio::select! {
-                        _ = stop.cancelled() => break,
-                        r = tokio::task::spawn_blocking(move || wlan::associate(&p)) => r,
-                    };
-                    if let Err(e) = joined.unwrap_or_else(|_| Err(anyhow!("join task panicked"))) {
-                        log::warn!("Wireless associate failed (will retry): {e:#}");
+            Ok(Self {
+                portal_ip,
+                probe_ip,
+                guard: RouteGuard::new(),
+            })
+        }
+
+        async fn run(mut self, mut lane_rx: mpsc::Receiver<LaneMsg>) {
+            while let Some(msg) = lane_rx.recv().await {
+                match msg {
+                    LaneMsg::Effect(effect) => self.run_effect(effect, true).await,
+                    LaneMsg::Shutdown(effects) => {
+                        for effect in effects {
+                            self.run_effect(effect, false).await;
+                        }
+                        break;
                     }
-                    join_since = Some(now());
-                }
-                Action::Disassociate => {
-                    ev(&ev_tx, "Wireless: releasing (wired healthy)");
-                    guard.teardown();
-                    tokio::select! {
-                        _ = stop.cancelled() => break,
-                        _ = tokio::task::spawn_blocking(wlan::disassociate) => {}
-                    }
-                    verdict = None;
-                }
-                Action::PortalAuth => {
-                    let Some(a) = wlan.as_ref() else {
-                        brain.on_auth(false, "wlan ip lost", now());
-                        // 认证尝试已使缓存探测结论失效，须清：Online 相的
-                        // Kicked 检查先于探测定时器，残留 Kicked 会把
-                        // manager 钉进无限重认证循环（review Critical）。
-                        verdict = None;
-                        continue;
-                    };
-                    let Some(gw) = a.gateway else {
-                        brain.on_auth(false, "wlan gateway missing", now());
-                        verdict = None;
-                        continue;
-                    };
-                    guard.ensure(&[portal_ip, probe_ip], gw, a.ifindex);
-                    // 实测（2026-09-10 真机）：/32 路由写入后需数秒才在数据面
-                    // 生效（首个 SYN 直接超时，~2-8s 后恢复 302/200）。路由传播/
-                    // ARP 解析窗口。等一拍再发首个请求，避开首连竞态。
-                    tokio::select! {
-                        _ = stop.cancelled() => break,
-                        _ = sleep(Duration::from_secs(3)) => {}
-                    }
-                    let url = portal::build_login_url(
-                        &cfg.portal_url,
-                        &cfg.user,
-                        &cfg.pass,
-                        a.ipv4,
-                        &cfg.wlan_ac_ip,
-                    );
-                    // 日志只落脱敏 URL（内含明文密码）。
-                    log::info!(
-                        "Wireless: portal login from {} ({})",
-                        a.ipv4,
-                        portal::redact_query(&url)
-                    );
-                    // 挂死会话兜底：portal_get 卡死不能把 Brain 永久钉在
-                    // Authing——超时按认证失败回报（T4 carry-forward）。
-                    let r = tokio::select! {
-                        _ = stop.cancelled() => break,
-                        r = tokio::time::timeout(
-                            PORTAL_AUTH_TIMEOUT,
-                            portal::portal_get(a.ipv4, &url),
-                        ) => r,
-                    };
-                    let (ok, msg) = match r {
-                        Ok(Some((code, body))) => match portal::parse_portal_reply(&body) {
-                            PortalResult::Success => (true, "login ok".to_string()),
-                            PortalResult::AlreadyOnline => (true, "already online".to_string()),
-                            PortalResult::Failure(m) => (false, m),
-                            PortalResult::Malformed => {
-                                (false, format!("unparseable reply (HTTP {code})"))
-                            }
-                        },
-                        Ok(None) => (false, "no reply".to_string()),
-                        Err(_) => (false, "portal auth timeout".to_string()),
-                    };
-                    if ok {
-                        ev(&ev_tx, "Wireless: portal login success");
-                    } else {
-                        ev(&ev_tx, &format!("Wireless: portal login failed: {msg}"));
-                    }
-                    brain.on_auth(ok, &msg, now());
-                    // 认证成功后 Brain 的探测定时器已复位（last_probe_at=None
-                    // → 下一拍 ProbeNow），此处同步清缓存结论，让下一拍用
-                    // 新鲜探测数据而非过期 Kicked 再触发一次 PortalAuth。
-                    verdict = None;
-                }
-                Action::ProbeNow => {
-                    let Some(a) = wlan.as_ref() else {
-                        verdict = Some(ProbeVerdict::LinkDown);
-                        continue;
-                    };
-                    let url = format!("http://{}/", cfg.probe_host);
-                    let v = tokio::select! {
-                        _ = stop.cancelled() => break,
-                        v = probe_once(a.ipv4, a.gateway, &url) => v,
-                    };
-                    if v != ProbeVerdict::Alive {
-                        ev(&ev_tx, &format!("Wireless probe: {v:?}"));
-                    }
-                    verdict = Some(v);
                 }
             }
-            // metric 压制：standby 常压；exclusive 仅接管窗口（有线会话不健康）
-            // 压——会话死但线还在时物理口被校园网墙，WLAN 必须压过它才有网。
-            // exclusive + 有线健康 = 让位瞬间：解除压制（路由去留由后续
-            // ensure/teardown 决定）。
-            let mode = *mode_rx.borrow_and_update();
-            let wired_connected = *wired_rx.borrow_and_update();
-            if let Some(a) = &wlan {
-                let takeover_active = mode == NetMode::WiredExclusive && !wired_connected;
-                if mode == NetMode::WiredPlusStandby || takeover_active {
-                    guard.set_standby_metric(a.ifindex, cfg.standby_metric);
+            // 兜底（自包含铁律第三出口）：Guard Drop 删路由 + 还原 metric；
+            // 显式 Shutdown 后为空操作。
+        }
+
+        /// 执行一条无线效果。`race_stop=true` 时长 await 与 stop 竞争（取消即
+        /// 放弃结果）；`false` = 停止握手效果，必须执行完（不可取消）。
+        async fn run_effect(&mut self, effect: Effect, _race_stop: bool) {
+            match effect {
+                Effect::CleanupStaleRoutes => {
+                    routes::cleanup_stale(&[self.portal_ip, self.probe_ip]);
                 }
-            }
-            if mode == NetMode::WiredExclusive && wired_connected {
-                guard.release_metric();
-            }
-            // Joining 超时 → 复位重关联（IP/DHCP 迟迟不来的场景）。
-            if brain.phase() == WPhase::Joining
-                && join_since.is_some_and(|t| now() - t > JOIN_TIMEOUT_SECS)
-            {
-                ev(&ev_tx, "Wireless: join timeout, restarting");
-                brain.restart();
-                join_since = None;
-            }
-            let mut snap = brain.snapshot();
-            snap.ip = wlan.map(|a| a.ipv4.to_string());
-            let _ = wl_tx.send(snap);
-            tokio::select! {
-                _ = stop.cancelled() => break,
-                _ = sleep(Duration::from_secs(2)) => {}
+                Effect::EnsureRoutes {
+                    dests,
+                    gateway,
+                    ifindex,
+                } => self.guard.ensure(&dests, gateway, ifindex),
+                Effect::SuppressMetric { ifindex, target } => {
+                    self.guard.set_standby_metric(ifindex, target);
+                }
+                Effect::ReleaseMetric => self.guard.release_metric(),
+                Effect::TeardownRoutes => self.guard.teardown(),
+                Effect::Disassociate => {
+                    let _ = tokio::task::spawn_blocking(wlan::disassociate).await;
+                }
+                Effect::Associate(_)
+                | Effect::Settle(_)
+                | Effect::PortalAuth { .. }
+                | Effect::WlanProbe { .. } => {
+                    log::warn!("Wireless worker: effect pending implementation: {effect:?}");
+                }
+                other => log::warn!("Wireless worker received non-wireless effect: {other:?}"),
             }
         }
-        // 退出收尾：删路由 + 还原 metric + 断开 WLAN（自包含铁律的第三出口）。
-        guard.teardown();
-        let _ = tokio::task::spawn_blocking(wlan::disassociate).await;
-        let _ = wl_tx.send(WirelessSnapshot::default());
-        ev(&ev_tx, "Wireless: manager stopped");
+    }
+
+    /// 壳侧执行器状态：Supervisor + watchdog + 持久化配置 + 唯一发布通道。
+    struct Shell {
+        core: Supervisor,
+        watchdog: Watchdog,
+        /// Config 副本（Supervisor 持自己的原件）；仅 SetMode 持久化用。
+        cfg: Config,
+        cfg_path: PathBuf,
+        snap_tx: watch::Sender<StateSnapshot>,
+        /// Wireless lane 发送端（worker 未启用时不会收到无线效果）。
+        lane_tx: mpsc::Sender<LaneMsg>,
+        /// Stop 反应收集的无线 teardown 效果（交 worker 不可取消执行）。
+        shutdown_effects: Vec<Effect>,
+        /// 已进入停止流程（Stop 事件已入队/处理中）。
+        stopping: bool,
+        /// 核心给的下一次绝对唤醒（单调毫秒）。
+        wake_at: Option<u64>,
+        /// 壳侧读取同一单调时钟（与核心 SystemClock 起点差可忽略）。
+        clock: SystemClock,
+    }
+
+    impl Shell {
+        /// Main 车道效果内联执行；返回结果事件（同轮 FIFO 回灌）。
+        async fn exec_main(&mut self, effect: Effect) -> Option<Event> {
+            match effect {
+                Effect::StepWatchdog => {
+                    let delay = self.watchdog.run_once().await;
+                    let ppp_ip = adapter::ppp_adapter_ip().map(|ip| ip.to_string());
+                    Some(Event::WatchdogStepped(WatchdogStep {
+                        delay,
+                        session: self.watchdog.view(),
+                        ppp_ip,
+                    }))
+                }
+                Effect::RequestRedial => {
+                    self.watchdog.request_redial();
+                    None
+                }
+                Effect::SetWatchdogLink(up) => {
+                    self.watchdog.set_eth_link(up);
+                    None
+                }
+                Effect::Hangup => {
+                    self.watchdog.shutdown().await;
+                    None
+                }
+                Effect::SampleLink => {
+                    let up = tokio::task::spawn_blocking(adapter::ethernet_link_up)
+                        .await
+                        .unwrap_or(None);
+                    Some(Event::LinkSampled(up))
+                }
+                Effect::SampleWireless => {
+                    // 一次 blocking 采样：关联态 + WLAN 适配器（同旧 manager 一拍）。
+                    let (associated, wlan) = tokio::task::spawn_blocking(|| {
+                        (wlan::associated(), adapter::wlan_adapter())
+                    })
+                    .await
+                    .unwrap_or((false, None));
+                    Some(Event::WirelessSampled(WirelessSample {
+                        associated,
+                        wlan: wlan.map(|a| WlanSample {
+                            ipv4: a.ipv4,
+                            gateway: a.gateway,
+                            ifindex: a.ifindex,
+                        }),
+                    }))
+                }
+                Effect::PersistMode(mode) => {
+                    self.cfg.wireless.mode = mode;
+                    if let Err(e) = self.cfg.save(&self.cfg_path) {
+                        log::warn!("Failed to persist mode to config (ignored): {e:#}");
+                    }
+                    None
+                }
+                Effect::Notify { key, title, body } => {
+                    let delivered = match notify::toast(&title, &body) {
+                        Ok(()) => true,
+                        Err(e) => {
+                            log::warn!("Toast failed (ignored): {e:#}");
+                            false
+                        }
+                    };
+                    Some(Event::NotifyResult { key, delivered })
+                }
+                other => {
+                    debug_assert!(false, "wireless effect on Main lane: {other:?}");
+                    log::error!("Main executor received wireless effect: {other:?}");
+                    None
+                }
+            }
+        }
+
+        /// 喂事件给核心：内联执行 Main 效果（结果 FIFO 回灌），Wireless 效果
+        /// 转发 worker；快照只在核心判定变化时经唯一发布点推送。
+        async fn drain(&mut self, queue: &mut VecDeque<Event>) {
+            while let Some(event) = queue.pop_front() {
+                let reaction = self.core.on(event);
+                self.wake_at = reaction.wake_at;
+                // 快照唯一发布点（I2）。
+                if let Some(snapshot) = reaction.snapshot {
+                    let _ = self.snap_tx.send(snapshot);
+                }
+                for effect in reaction.effects {
+                    match effect.lane() {
+                        Lane::Main => {
+                            if let Some(result) = self.exec_main(effect).await {
+                                queue.push_back(result);
+                            }
+                        }
+                        Lane::Wireless => {
+                            if self.stopping {
+                                self.shutdown_effects.push(effect);
+                            } else if self.lane_tx.send(LaneMsg::Effect(effect)).await.is_err() {
+                                log::warn!("Wireless lane closed, effect dropped");
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 
     /// 服务主体：建 runtime → 装配 → 循环直到 stop → hangup 收尾。
@@ -496,7 +420,7 @@ mod win {
         result
     }
 
-    async fn run(mut cfg: Config, cfg_path: PathBuf, stop: CancellationToken) -> Result<()> {
+    async fn run(cfg: Config, cfg_path: PathBuf, stop: CancellationToken) -> Result<()> {
         // 密码运行时解密一次；失败 bail（重输密码场景由 install 负责）。
         let pass = crypto::unprotect(&cfg.account.password_blob)
             .context("Failed to decrypt password_blob (re-run install to enter password)")?;
@@ -564,6 +488,7 @@ mod win {
             });
         }
 
+        // watchdog 装配（真实现原位保留，核心只发效果不持有 dialer/prober）。
         let watchdog_cfg = WatchdogCfg {
             redial_min: Duration::from_secs(1),
             redial_max: Duration::from_secs(300),
@@ -575,231 +500,119 @@ mod win {
             interface: cfg.dial.interface.clone(),
             http_url: cfg.dial.http_probe_url.clone(),
         };
-        let mut watchdog = Watchdog::new(dialer, prober, watchdog_cfg);
+        let watchdog = Watchdog::new(dialer, prober, watchdog_cfg);
 
-        // 状态快照通道 + IPC server：客户端（status/托盘）连上来即见当前状态。
-        let (snap_tx, snap_rx) = watch::channel(watchdog.snapshot());
+        // 组合核心 + IPC server：watch 初值即核心组合快照（客户端连上即见）。
+        let core = Supervisor::new(cfg.clone(), SystemClock::new());
+        let (snap_tx, snap_rx) = watch::channel(core.snapshot());
         let (cmd_tx, mut cmd_rx) = mpsc::channel::<Command>(16);
         server::spawn_server(snap_rx, cmd_tx, stop.clone());
 
-        // 无线接管装配（ADR-0005）：模式广播 + 有线状态广播 + manager actor。
-        // mode/事件由主循环在 SetMode/ev_rx 消费时更新；wired 由 run_once 后回填。
-        let init_mode = cfg.wireless.mode;
-        let (mode_tx, mode_rx) = watch::channel(init_mode);
-        let (wired_tx, wired_rx) = watch::channel(false);
-        let (wl_tx, mut wl_rx) = watch::channel(WirelessSnapshot::default());
-        let (ev_tx, mut ev_rx) = mpsc::channel::<String>(64);
-        let mut events = EventLog::new();
-        events.push(
-            unix_now(),
-            &format!("Service started, mode {}", mode_text(init_mode)),
-        );
+        // 无线 lane worker（wireless.enabled 且 portal/probe 可解析时 spawn）。
+        let (lane_tx, lane_rx) = mpsc::channel::<LaneMsg>(64);
+        let (_wl_tx, mut wl_rx) = mpsc::channel::<Event>(64);
+        let mut worker_handle = None;
         if cfg.wireless.enabled {
-            let mcfg = ManagerCfg {
-                profile: cfg.wireless.profile.clone(),
-                portal_url: cfg.wireless.portal_url.clone(),
-                wlan_ac_ip: cfg.wireless.wlan_ac_ip.clone(),
-                probe_host: cfg.wireless.probe_host.clone(),
-                user: cfg.account.student_id.clone(),
-                pass: pass.clone(),
-                takeover_after: cfg.wireless.takeover_after_secs,
-                release_after: cfg.wireless.release_after_secs,
-                probe_interval: cfg.dial.probe_interval_secs,
-                standby_metric: cfg.wireless.standby_metric,
-            };
-            let mstop = stop.child_token();
-            let ev_tx = ev_tx.clone();
-            let m_wl_tx = wl_tx.clone();
-            // 诊断保险：panic 不能静默——tokio 会把 panic 吞进 JoinHandle，
-            // 2026-09-10 真机事故（cleanup_stale 越界）就是这样丢的 manager。
-            let handle = tokio::spawn(async move {
-                wireless_manager(mcfg, mstop, mode_rx, wired_rx, m_wl_tx, ev_tx).await;
-            });
-            let panic_wl_tx = wl_tx.clone();
-            tokio::spawn(async move {
-                match handle.await {
-                    Ok(()) => log::info!("Wireless manager task finished"),
-                    Err(e) if e.is_panic() => {
-                        // manager 已死：托盘/status 不能继续显示 "Wireless: Online"。
-                        let _ = panic_wl_tx.send(WirelessSnapshot::default());
-                        log::error!("Wireless manager PANICKED (wireless disabled): {e}")
-                    }
-                    Err(e) => log::warn!("Wireless manager task join error: {e}"),
-                }
-            });
+            match WirelessWorker::new(&cfg) {
+                Ok(worker) => worker_handle = Some(tokio::spawn(worker.run(lane_rx))),
+                Err(e) => log::error!("{e:#}"),
+            }
         }
 
-        // 快照组装：watchdog 原始快照 + PPP IP + 心跳/模式/无线/事件环富化。
-        // events 经参数传入（闭包持不可变借用会与主循环的 events.push 冲突）。
-        let compose = |mut snap: StateSnapshot, events: &EventLog| {
-            snap.ip = adapter::ppp_adapter_ip().map(|ip| ip.to_string());
-            snap.heartbeat = hb_tx.borrow().clone();
-            snap.mode = *mode_tx.borrow();
-            snap.wireless = wl_tx.borrow().clone();
-            snap.events = events.ring().clone();
-            snap
+        let mut shell = Shell {
+            core,
+            watchdog,
+            cfg,
+            cfg_path,
+            snap_tx,
+            lane_tx,
+            shutdown_effects: Vec::new(),
+            stopping: false,
+            wake_at: None,
+            clock: SystemClock::new(),
         };
 
-        // 通知钩子状态：重拨连续失败起点 + 节流器。
-        let mut notifier = Notifier::new();
-        let mut failing_since: Option<Instant> = None;
-        // 下一次性 run_once 的绝对时刻（首轮立即执行）。用"绝对时刻 + 剩余
-        // 时长"而非"每次重置的 sleep"，否则无线 manager 每 2s 推快照会反复
-        // 唤醒 select、把退避 sleep 切碎——真机 2026-09-10：无网线时 7 分钟
-        // 重拨 79 次（756 刷屏）、有线时探针间隔从 30s 掉到 2s。
-        let mut wake_at = Instant::now();
-        // 以太网链路轮询（拔线门控 + 插线立即重拨）。2s 一拍，与无线 manager 同频。
-        let mut link_tick = tokio::time::interval(Duration::from_secs(2));
-        link_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-        // 启动即采样：无网线时宁可等，绝不在无载波时拨号（端口会卡 756）。
-        let initial_link = tokio::task::spawn_blocking(adapter::ethernet_link_up)
-            .await
-            .unwrap_or(None);
-        if initial_link == Some(false) {
-            log::info!("Ethernet link down at startup, dial paused");
-        }
-        watchdog.set_eth_link(initial_link);
+        // 装配完成事件：核心由此进入运行态（首拍立即调度链路采样 + 拨号）。
+        let mut queue = VecDeque::new();
+        queue.push_back(Event::Started);
+        shell.drain(&mut queue).await;
+
+        // 通道存活标志：watch/mpsc 关闭后必须停用分支，防 busy-loop。
+        let mut hb_alive = true;
+        let mut wireless_alive = worker_handle.is_some();
 
         loop {
-            let remaining = wake_at.saturating_duration_since(Instant::now());
-            // run_once 只在计时到点或显式 Redial 命令时执行；事件唤醒（hb/wl/
-            // ev）只推快照，绝不落到 run_once（否则事件频率决定状态机频率）。
-            let mut run_state_machine = false;
+            if shell.stopping {
+                break;
+            }
+            let sleep_for = match shell.wake_at {
+                Some(at) => Duration::from_millis(at.saturating_sub(shell.clock.now_ms())),
+                None => Duration::from_secs(60 * 60 * 24), // 无定时器：长时间挂起
+            };
             tokio::select! {
-                _ = stop.cancelled() => break,
-                // 外层 select 只轮询事件，绝不含 run_once——在飞的 run_once
-                // 由循环体内独占 await 执行，任何命令都无法打断/drop 它
-                // （结构保证，不依赖守卫 bool）。
-                maybe_cmd = cmd_rx.recv() => {
-                    match maybe_cmd {
-                        Some(Command::Redial) => {
-                            log::info!("IPC command: manual redial");
-                            // 置一次性标志即返回；立即跑一轮（顶部消费标志），
-                            // 不等剩余退避时长。
-                            watchdog.request_redial();
-                            run_state_machine = true;
-                        }
-                        Some(Command::SetMode { mode }) => {
-                            log::info!("IPC command: set mode {}", mode_text(mode));
-                            // 最新胜（watch replace 语义）+ 落盘（失败仅警告：
-                            // 模式切换不因磁盘问题被拒）。send 失败 = manager
-                            // 已死（无接收者），必须显式记录而非静默——真机
-                            // 2026-09-10 教训。
-                            if mode_tx.send(mode).is_err() {
-                                log::error!(
-                                    "SetMode failed: wireless manager not running (receiver dropped)"
-                                );
+                // 顺序即优先级：stop 最先。
+                _ = stop.cancelled() => {
+                    log::info!("Stop signal received, hanging up and exiting");
+                    shell.stopping = true;
+                    queue.clear();
+                    queue.push_back(Event::Stop);
+                }
+                maybe_cmd = cmd_rx.recv() => match maybe_cmd {
+                    Some(cmd) => queue.push_back(Event::Command(cmd)),
+                    // IPC server 已退出（随 stop）：走停止握手防 busy-loop。
+                    None => {
+                        shell.stopping = true;
+                        queue.clear();
+                        queue.push_back(Event::Stop);
+                    }
+                },
+                changed = hb_rx.changed(), if hb_alive => match changed {
+                    Ok(()) => queue.push_back(Event::Heartbeat(hb_rx.borrow_and_update().clone())),
+                    Err(_) => hb_alive = false,
+                },
+                maybe_event = wl_rx.recv(), if wireless_alive => match maybe_event {
+                    Some(event) => queue.push_back(event),
+                    None => {
+                        // worker 退出/panic：核验 join 结果并让核心降级（事件环 + 默认快照）。
+                        wireless_alive = false;
+                        if let Some(handle) = worker_handle.take() {
+                            match handle.await {
+                                Ok(()) => log::info!("Wireless worker task finished"),
+                                Err(e) if e.is_panic() => {
+                                    log::error!("Wireless worker PANICKED (wireless degraded): {e}")
+                                }
+                                Err(e) => log::warn!("Wireless worker task join error: {e}"),
                             }
-                            cfg.wireless.mode = mode;
-                            if let Err(e) = cfg.save(&cfg_path) {
-                                log::warn!("Failed to persist mode to config (ignored): {e:#}");
-                            }
-                            events.push(
-                                unix_now(),
-                                &format!("Mode switched to {}", mode_text(mode)),
-                            );
-                            let _ = snap_tx.send(compose(watchdog.snapshot(), &events));
                         }
-                        // IPC server 已退出（随 stop）：break 防 busy-loop。
-                        None => break,
+                        queue.push_back(Event::WirelessDied);
                     }
-                }
-                _ = sleep(remaining) => {
-                    run_state_machine = true;
-                }
-                // 链路轮询：喂 watchdog 门控；链路 false→true 立即重拨（插线即拨）。
-                _ = link_tick.tick() => {
-                    let up = tokio::task::spawn_blocking(adapter::ethernet_link_up)
-                        .await
-                        .unwrap_or(None);
-                    // 瞬时 None（采样失败/驱动抖动）不得覆盖已知链路态：否则
-                    // 拔线门控被洗掉，watchdog 会在无载波时拨号卡 756。启动
-                    // 采样仍允许落 None（尚无已知态可保）。
-                    if let Some(up) = up {
-                        if watchdog.eth_link() != Some(up) {
-                            log::info!("Ethernet link state: {:?}", Some(up));
-                            if watchdog.eth_link() == Some(false) {
-                                log::info!("Ethernet link restored, redialing immediately");
-                                events.push(unix_now(), "Ethernet link restored, redialing");
-                                watchdog.request_redial();
-                                run_state_machine = true;
-                            }
-                            watchdog.set_eth_link(Some(up));
-                            let _ = snap_tx.send(compose(watchdog.snapshot(), &events));
-                        }
-                    }
-                }
-                // 钩子：心跳报 Error → Toast（节流）+ 立即推快照
-                // （长 sleep 间隔下 hb 状态变化须即时可见）。
-                hb_changed = hb_rx.changed() => {
-                    if hb_changed.is_ok() {
-                        if let HeartbeatStatus::Error(e) = hb_rx.borrow().clone() {
-                            notifier.fire(
-                                "heartbeat_error",
-                                "gdut-net heartbeat error",
-                                &format!("Compatibility heartbeat error: {e}"),
-                            );
-                            let _ = snap_tx.send(compose(watchdog.snapshot(), &events));
-                        }
-                    }
-                }
-                // 无线快照变化（manager 每拍/退出时推）→ 重推富化快照。
-                wl_changed = wl_rx.changed() => {
-                    if wl_changed.is_ok() {
-                        let _ = snap_tx.send(compose(watchdog.snapshot(), &events));
-                    }
-                }
-                // manager 事件（关联/认证/释放/超时）→ 事件环 + 重推快照。
-                ev = ev_rx.recv() => {
-                    if let Some(msg) = ev {
-                        events.push(unix_now(), &msg);
-                        let _ = snap_tx.send(compose(watchdog.snapshot(), &events));
-                    }
-                }
+                },
+                _ = sleep(sleep_for) => queue.push_back(Event::Wake),
             }
-            if !run_state_machine {
-                continue;
-            }
-
-            // 状态机单步：独占 await（拨号 spawn_blocking 期间不受命令
-            // 分支影响），完成后再轮询事件。
-            let d = watchdog.run_once().await;
-
-            // 有线会话状态广播（manager 的 takeover/release 判定输入）。
-            let _ = wired_tx.send(matches!(
-                watchdog.snapshot().status,
-                SessionStatus::Connected
-            ));
-
-            let snap = compose(watchdog.snapshot(), &events);
-            let _ = snap_tx.send(snap.clone());
-
-            // 钩子：连续重拨失败累计 ≥10 分钟未恢复 → Toast。
-            // 拔线暂停（last_drop_reason == "Ethernet link down"）不是失败：
-            // 此刻可能 WLAN 正在承载，弹凭据提示纯属误导，跳过。
-            if snap.status == SessionStatus::Backoff || snap.status == SessionStatus::AuthFail {
-                let since = *failing_since.get_or_insert_with(Instant::now);
-                let link_down_pause =
-                    snap.last_drop_reason.as_deref() == Some("Ethernet link down");
-                if since.elapsed() >= REDIAL_FAILING_TOAST_AFTER && !link_down_pause {
-                    notifier.fire(
-                        "redial_failing",
-                        "gdut-net network error",
-                        &format!(
-                            "Redial failed for {} minutes ({} attempts), check network or credentials",
-                            since.elapsed().as_secs() / 60,
-                            snap.redial_attempts
-                        ),
-                    );
-                }
-            } else if snap.status == SessionStatus::Connected && failing_since.take().is_some() {
-                log::info!("Redial succeeded, session restored");
-            }
-            wake_at = Instant::now() + d;
+            shell.drain(&mut queue).await;
         }
 
-        log::info!("Stop signal received, hanging up and exiting");
-        watchdog.shutdown().await;
+        // 停止握手：worker 的 teardown 效果不可取消；等 worker 退出，
+        // RouteGuard::drop 是最后兜底。
+        let shutdown_effects = std::mem::take(&mut shell.shutdown_effects);
+        if shell
+            .lane_tx
+            .send(LaneMsg::Shutdown(shutdown_effects))
+            .await
+            .is_err()
+        {
+            log::warn!("Wireless lane closed before shutdown; relying on RouteGuard drop");
+        }
+        if let Some(handle) = worker_handle.take() {
+            match tokio::time::timeout(WORKER_EXIT_TIMEOUT, handle).await {
+                Ok(Ok(())) => log::info!("Wireless worker task finished"),
+                Ok(Err(e)) if e.is_panic() => {
+                    log::error!("Wireless worker PANICKED (wireless degraded): {e}")
+                }
+                Ok(Err(e)) => log::warn!("Wireless worker task join error: {e}"),
+                Err(_) => log::warn!("Wireless worker did not exit within 5s, continuing shutdown"),
+            }
+        }
         Ok(())
     }
 }
