@@ -140,9 +140,13 @@ impl RouteGuard {
         if self.applied_metric_ifindex == Some(ifindex) {
             return; // 幂等
         }
-        // 原值只保存一次；释放失败后的再次压制不得覆盖它（同一会话 ifindex 稳定；
-        // 本机实测 WLAN ifindex 每次启动固定）。
-        if self.saved_metric.is_none() {
+        // 原值只保存一次：同接口的重试（释放失败后再次压制）不得覆盖它。
+        // 接口变了（WLAN 重连换 ifindex，真机观察 15→16）：旧接口已消失，
+        // 按新接口重新读取并保存真实原值，保证释放作用于活接口。
+        if self
+            .saved_metric
+            .is_none_or(|(saved_ifindex, _, _)| saved_ifindex != ifindex)
+        {
             // 先读原值（保存），再压
             let mut row = MIB_IPINTERFACE_ROW::default();
             unsafe { InitializeIpInterfaceEntry(&mut row) };
