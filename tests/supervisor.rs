@@ -1232,3 +1232,96 @@ async fn wireless_died_degrades_to_default_snapshot() {
     h.run_until(10_000).await;
     assert!(h.take_wireless().is_empty());
 }
+
+/// 事件环消息去 `[HH:MM:SS] ` 前缀后去重收集（冻结文案逐字断言）。
+fn collect_ring(h: &Harness, out: &mut Vec<String>) {
+    for line in h.ring() {
+        let msg = match line.split_once("] ") {
+            Some((_, m)) => m.to_string(),
+            None => line,
+        };
+        if !out.contains(&msg) {
+            out.push(msg);
+        }
+    }
+}
+
+#[tokio::test]
+async fn event_ring_strings_are_frozen_byte_for_byte() {
+    let mut seen: Vec<String> = Vec::new();
+
+    // 有线侧：启动 / 切模式 / 插线即拨。
+    let mut h = Harness::new(wired_cfg(), false);
+    h.push(Event::Started).await;
+    collect_ring(&h, &mut seen);
+    h.push(Event::Command(Command::SetMode {
+        mode: NetMode::WiredPlusStandby,
+    }))
+    .await;
+    collect_ring(&h, &mut seen);
+    h.advance_to_wake().await; // t=0: 拨号
+    h.world.link = Some(false);
+    h.clock.advance(2_000);
+    h.push(Event::Wake).await; // 拔线采样
+    h.world.link = Some(true);
+    h.advance_to_wake().await; // 插线边沿
+    collect_ring(&h, &mut seen);
+
+    // 无线侧：关联 / join 超时 / 认证失败与成功 / 探测 / 让位 / manager 退出。
+    let mut w = Harness::new(wireless_cfg(NetMode::WiredPlusStandby), false);
+    w.push(Event::Started).await;
+    collect_ring(&w, &mut seen);
+    w.push(Event::AssociateFinished(Ok(()))).await;
+    w.advance_to_wake().await; // t=0: 拨号
+    w.run_until(62_000).await; // join 超时（60s 后首个到点拍）
+    collect_ring(&w, &mut seen);
+
+    w.world.wireless = wlan_sample("10.1.1.5", Some("10.1.1.1"), 15);
+    w.run_until(64_000).await; // 重新关联
+    w.push(Event::AssociateFinished(Ok(()))).await;
+    w.run_until(66_000).await; // PortalAuth
+    w.push(Event::PortalFinished(PortalAttempt::Failed(
+        "bad password".into(),
+    )))
+    .await;
+    collect_ring(&w, &mut seen);
+
+    w.run_until(72_000).await; // Error 退避后重新关联
+    w.push(Event::AssociateFinished(Ok(()))).await;
+    w.run_until(76_000).await; // PortalAuth
+    w.push(Event::PortalFinished(PortalAttempt::Replied {
+        status: 200,
+        body: PORTAL_SUCCESS.into(),
+    }))
+    .await;
+    w.run_until(78_000).await; // ProbeNow
+    w.push(Event::WlanProbeFinished(ProbeVerdict::Kicked)).await;
+    collect_ring(&w, &mut seen);
+
+    w.push(Event::Command(Command::SetMode {
+        mode: NetMode::WiredExclusive,
+    }))
+    .await;
+    w.run_until(90_000).await; // 有线健康 10s → 让位
+    collect_ring(&w, &mut seen);
+    w.push(Event::WirelessDied).await;
+    collect_ring(&w, &mut seen);
+
+    for expected in [
+        "Service started, mode wired-plus-standby",
+        "Mode switched to wired-plus-standby",
+        "Ethernet link restored, redialing",
+        "Wireless: associating to campus SSID",
+        "Wireless: join timeout, restarting",
+        "Wireless: portal login failed: bad password",
+        "Wireless: portal login success",
+        "Wireless probe: Kicked",
+        "Wireless: releasing (wired healthy)",
+        "Wireless: manager stopped",
+    ] {
+        assert!(
+            seen.iter().any(|m| m == expected),
+            "missing frozen ring line {expected:?}; seen {seen:?}"
+        );
+    }
+}

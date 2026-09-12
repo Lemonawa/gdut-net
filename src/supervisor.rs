@@ -4,6 +4,13 @@
 //! （Task 9 的 `runtime.rs`）执行，结果以 [`Event`] 回灌。设计见 W8 选型 B
 //! （Supervisor + Main/Wireless 双车道）：`Reaction.snapshot` 是全服务唯一快照发布
 //! 出口，`Reaction.wake_at` 是唯一睡眠依据（绝对单调毫秒）。
+//!
+//! 不变量索引（I1–I11，完整文本见 Task 8 brief；每条在 `tests/supervisor.rs` 有断言）：
+//! 纯粹性 / 快照单出口 / 步进三触发点 / 双车道 / 链路门控 / 无线生命周期 / 绝对唤醒 /
+//! 通知节流 / 结果护栏 / 生命周期 / 降级。
+//!
+//! 执行器义务（Task 9 壳）：Main 车道按序内联执行并回灌结果；Wireless 车道交 worker
+//! 串行执行；快照仅在 `Reaction.snapshot` 为 `Some` 时经唯一发布点推送；睡眠用 `wake_at`。
 
 use std::net::Ipv4Addr;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
