@@ -131,8 +131,11 @@ pub enum Event {
     Wake,
     /// IPC Redial / SetMode。
     Command(Command),
-    /// 2s 链路采样结果。
-    LinkSampled(Option<bool>),
+    /// 链路采样结果（同拍读取 PPP 会话 IP，保证快照 IP 新鲜；None = 无会话/读取失败）。
+    LinkSampled {
+        up: Option<bool>,
+        ppp_ip: Option<String>,
+    },
     /// `Effect::StepWatchdog` 的结果。
     WatchdogStepped(WatchdogStep),
     /// 2s 无线采样结果。
@@ -369,7 +372,9 @@ impl Supervisor {
                 Event::Started => {} // 幂等：Started 恰好一次
                 Event::Wake => self.handle_wake(now, &mut effects),
                 Event::Command(cmd) => self.handle_command(cmd, wall, &mut effects),
-                Event::LinkSampled(up) => self.handle_link_sampled(up, now, wall, &mut effects),
+                Event::LinkSampled { up, ppp_ip } => {
+                    self.handle_link_sampled(up, ppp_ip, now, wall, &mut effects)
+                }
                 Event::WatchdogStepped(step) => {
                     self.handle_watchdog_stepped(step, now, &mut effects)
                 }
@@ -487,7 +492,6 @@ impl Supervisor {
             Command::SetMode { mode } => {
                 log::info!("IPC command: set mode {}", mode_text(mode));
                 self.mode = mode;
-                self.cfg.wireless.mode = mode;
                 if let Some(brain) = self.brain.as_mut() {
                     brain.set_mode(mode);
                 }
@@ -501,6 +505,7 @@ impl Supervisor {
     fn handle_link_sampled(
         &mut self,
         up: Option<bool>,
+        ppp_ip: Option<String>,
         now: u64,
         wall: u64,
         effects: &mut Vec<Effect>,
@@ -509,6 +514,8 @@ impl Supervisor {
             return; // I9：重复/迟到结果 no-op
         }
         self.sample_in_flight = false;
+        // 无条件覆盖：适配器消失时同旧 compose 一样清空 IP（None 也是有效事实）。
+        self.ppp_ip = ppp_ip;
         let old = self.eth_link;
         // I5：已知链路态只接受 Some(_) 覆盖；首次采样（含 None）例外。
         let next = if self.link_sample_seen {

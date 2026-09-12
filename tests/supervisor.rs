@@ -231,7 +231,10 @@ impl Harness {
 
     async fn exec_main(&mut self, effect: &Effect, queue: &mut VecDeque<Event>) {
         match effect {
-            Effect::SampleLink => queue.push_back(Event::LinkSampled(self.world.link)),
+            Effect::SampleLink => queue.push_back(Event::LinkSampled {
+                up: self.world.link,
+                ppp_ip: self.world.ppp_ip.clone(),
+            }),
             Effect::SampleWireless => {
                 if self.auto_sample_wireless {
                     queue.push_back(Event::WirelessSampled(self.world.wireless));
@@ -652,7 +655,11 @@ async fn late_and_duplicate_results_are_inert() {
     // Associate 结果（在飞）无副作用；重复结果与无在飞请求的结果全部 no-op（I9）。
     h.push(Event::AssociateFinished(Ok(()))).await;
     h.push(Event::AssociateFinished(Err("late".into()))).await;
-    h.push(Event::LinkSampled(Some(false))).await;
+    h.push(Event::LinkSampled {
+        up: Some(false),
+        ppp_ip: None,
+    })
+    .await;
     h.push(Event::WirelessSampled(wlan_sample(
         "10.1.1.5",
         Some("10.1.1.1"),
@@ -672,7 +679,7 @@ async fn late_and_duplicate_results_are_inert() {
         "duplicate results must not touch the event ring"
     );
 
-    // 迟到的 LinkSampled(Some(false)) 没有翻转已知链路态。
+    // 迟到的 LinkSampled { up: Some(false) } 没有翻转已知链路态。
     h.advance_to_wake().await;
     assert!(
         !h.take_effects()
@@ -680,6 +687,28 @@ async fn late_and_duplicate_results_are_inert() {
             .any(|e| matches!(e, Effect::SetWatchdogLink(Some(false)))),
         "late LinkSampled must not flip the known link state"
     );
+}
+
+#[tokio::test]
+async fn link_sample_refreshes_ppp_ip() {
+    // 拨号成功瞬间 PPP 适配器可能尚不可枚举：WatchdogStepped.ppp_ip = None。
+    let mut h = Harness::new(wired_cfg(), false);
+    h.world.ppp_ip = None;
+    h.start_and_connect().await;
+    assert_eq!(h.sup.snapshot().status, SessionStatus::Connected);
+    assert_eq!(h.sup.snapshot().ip, None);
+
+    // 下一笔链路采样（2s 轮询拍）同拍读到会话 IP：快照立即刷新，
+    // 不再等下一个探测周期（~30s；旧 runtime 每次推快照都重读）。
+    h.world.ppp_ip = Some("10.30.1.2".to_string());
+    let reactions = h.advance_to_wake().await;
+    assert_eq!(h.sup.snapshot().ip.as_deref(), Some("10.30.1.2"));
+    let published = reactions
+        .iter()
+        .filter_map(|r| r.snapshot.as_ref())
+        .next_back()
+        .expect("ppp_ip refresh must publish");
+    assert_eq!(published.ip.as_deref(), Some("10.30.1.2"));
 }
 
 #[tokio::test]
@@ -760,7 +789,11 @@ async fn started_and_stop_are_once() {
     h.push(Event::Stop).await;
     h.push(Event::Wake).await;
     h.push(Event::Command(Command::Redial)).await;
-    h.push(Event::LinkSampled(Some(true))).await;
+    h.push(Event::LinkSampled {
+        up: Some(true),
+        ppp_ip: None,
+    })
+    .await;
     assert_eq!(h.take_effects(), vec![]);
     assert_eq!(h.wake_at, None);
 }
@@ -867,8 +900,14 @@ async fn arbitrary_event_sequences_do_not_panic() {
     h.push(Event::Started).await;
     let junk = vec![
         Event::Wake,
-        Event::LinkSampled(None),
-        Event::LinkSampled(Some(false)),
+        Event::LinkSampled {
+            up: None,
+            ppp_ip: None,
+        },
+        Event::LinkSampled {
+            up: Some(false),
+            ppp_ip: None,
+        },
         Event::Wake,
         Event::Heartbeat(HeartbeatStatus::Off),
         Event::Command(Command::Redial),

@@ -247,7 +247,7 @@ fn run_install(tx: Sender<Ev>, args: SetupArgs, student_id: String, password: Op
                 None => {
                     // 后续步骤失败：此刻才回滚（日志文案与旧实现一致）。
                     log::error!("Install failed (rolling back): {e:#}");
-                    rollback_install(&prev)
+                    rollback_install(&prev, &config_path())
                 }
             };
             emit(

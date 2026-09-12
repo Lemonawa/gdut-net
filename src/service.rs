@@ -282,11 +282,13 @@ mod win {
         req: InstallRequest,
         prev: &PrevService,
     ) -> Result<InstallOutcome, InstallFailure> {
+        // 回滚要用本次请求的配置路径：`install_core` 会 move 掉 req。
+        let cfg_path = req.cfg_path.clone();
         match install_core(req) {
             Ok(outcome) => Ok(outcome),
             Err(error) => {
                 log::error!("Install failed (rolling back): {error:#}");
-                let rollback = rollback_install(prev);
+                let rollback = rollback_install(prev, &cfg_path);
                 Err(InstallFailure { error, rollback })
             }
         }
@@ -311,8 +313,10 @@ mod win {
     }
 
     /// 失败回滚：恢复旧服务注册（或删除新建服务），并回报回滚实情。
+    /// `cfg_path` 是本次安装请求的配置路径（可能是 `--config` 指定的非缺省值）：
+    /// 恢复注册必须指回它，否则自定义路径安装失败会把服务指向缺省配置。
     /// 服务原本存在但路径未知时不动注册（宁可不回滚，也不误删），但尽力把停掉的服务拉起来。
-    pub fn rollback_install(prev: &PrevService) -> RollbackOutcome {
+    pub fn rollback_install(prev: &PrevService, cfg_path: &Path) -> RollbackOutcome {
         match prev {
             PrevService::Unknown => {
                 log::warn!(
@@ -336,7 +340,7 @@ mod win {
                 }
             },
             PrevService::Known(exe) => {
-                match restore_service_path(Path::new(crate::paths::CONFIG_PATH), exe) {
+                match restore_service_path(cfg_path, exe) {
                     // 旧服务被本次安装停掉了：恢复注册后尽力把它拉起来。
                     Ok(()) => match start_service() {
                         Ok(()) => RollbackOutcome::Restored,

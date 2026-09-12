@@ -437,10 +437,17 @@ mod win {
                     None
                 }
                 Effect::SampleLink => {
-                    let up = tokio::task::spawn_blocking(adapter::ethernet_link_up)
-                        .await
-                        .unwrap_or(None);
-                    Some(Event::LinkSampled(up))
+                    // 链路态与 PPP 会话 IP 同拍读取：旧 compose 每次推快照都重读
+                    // ppp_adapter_ip()，这里把等价的新鲜度并进采样结果。
+                    let (up, ppp_ip) = tokio::task::spawn_blocking(|| {
+                        (adapter::ethernet_link_up(), adapter::ppp_adapter_ip())
+                    })
+                    .await
+                    .unwrap_or((None, None));
+                    Some(Event::LinkSampled {
+                        up,
+                        ppp_ip: ppp_ip.map(|ip| ip.to_string()),
+                    })
                 }
                 Effect::SampleWireless => {
                     // 一次 blocking 采样：关联态 + WLAN 适配器（同旧 manager 一拍）。
@@ -620,7 +627,8 @@ mod win {
         if cfg.wireless.enabled {
             match WirelessWorker::new(&cfg, pass, stop.child_token(), wl_tx) {
                 Ok(worker) => worker_handle = Some(tokio::spawn(worker.run(lane_rx))),
-                Err(e) => log::error!("{e:#}"),
+                // 核心（Supervisor::new）已对同一失败打 error，这里不重复。
+                Err(e) => log::debug!("{e:#}"),
             }
         }
 

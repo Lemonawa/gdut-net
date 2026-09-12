@@ -140,20 +140,24 @@ impl RouteGuard {
         if self.applied_metric_ifindex == Some(ifindex) {
             return; // 幂等
         }
-        // 先读原值（保存），再压
-        let mut row = MIB_IPINTERFACE_ROW::default();
-        unsafe { InitializeIpInterfaceEntry(&mut row) };
-        row.Family = AF_INET;
-        row.InterfaceIndex = ifindex;
-        if unsafe { GetIpInterfaceEntry(&mut row) } != ERROR_SUCCESS {
-            log::warn!("RouteGuard: read metric of if{ifindex} failed, skip suppression");
-            return;
+        // 原值只保存一次；释放失败后的再次压制不得覆盖它（同一会话 ifindex 稳定；
+        // 本机实测 WLAN ifindex 每次启动固定）。
+        if self.saved_metric.is_none() {
+            // 先读原值（保存），再压
+            let mut row = MIB_IPINTERFACE_ROW::default();
+            unsafe { InitializeIpInterfaceEntry(&mut row) };
+            row.Family = AF_INET;
+            row.InterfaceIndex = ifindex;
+            if unsafe { GetIpInterfaceEntry(&mut row) } != ERROR_SUCCESS {
+                log::warn!("RouteGuard: read metric of if{ifindex} failed, skip suppression");
+                return;
+            }
+            self.saved_metric = Some((ifindex, row.Metric, row.UseAutomaticMetric));
         }
         if let Err(e) = set_metric(ifindex, target) {
             log::warn!("RouteGuard suppress metric if{ifindex} -> {target} failed: {e:#}");
             return;
         }
-        self.saved_metric = Some((ifindex, row.Metric, row.UseAutomaticMetric));
         self.applied_metric_ifindex = Some(ifindex);
     }
 
