@@ -38,18 +38,9 @@ fn run_install(args: &SetupArgs) -> Result<()> {
                 rollback,
             } => {
                 eprintln!("FAILED: {e}");
-                match rollback {
-                    work::RollbackOutcome::NotNeeded => {}
-                    work::RollbackOutcome::Restored => {
-                        eprintln!("Rolled back to the previous service.");
-                    }
-                    work::RollbackOutcome::RestoredUnknown => {
-                        eprintln!(
-                            "Service existed but its path was unreadable; registration untouched, service restarted."
-                        );
-                    }
-                    // 回滚失败详情可能含中文（核心/GUI 文案）：英文标签 + 原文，不翻译。
-                    work::RollbackOutcome::Failed(r) => eprintln!("ROLLBACK FAILED: {r}"),
+                // 回滚行由 service 单点渲染（NotNeeded 不打印）。
+                if let Some(line) = crate::service::rollback_line_en(&rollback) {
+                    eprintln!("{line}");
                 }
                 std::process::exit(1);
             }
@@ -76,13 +67,7 @@ fn run_uninstall(args: &SetupArgs) -> Result<()> {
     // purge 只在显式 --purge 时为 true；卸载核心幂等宽容，返回分步报告。
     let report = crate::service::uninstall_core(&config_path(), args.purge)?;
     // 被容忍的单步失败照实上报（英文 + 原文）；Done/Skipped 不打印。退出码语义不变。
-    let steps = [
-        (work::STEP_UNINSTALL_SERVICE, report.service),
-        (work::STEP_UNINSTALL_EVENT_SOURCE, report.event_source),
-        (work::STEP_UNINSTALL_ENTROPY, report.entropy),
-        (work::STEP_UNINSTALL_AUTOSTART, report.autostart),
-    ];
-    for (key, step) in steps {
+    for (key, step) in report.rows() {
         if let crate::service::Step::Failed(e) = step {
             eprintln!("step failed: {}: {e}", work::step_label_en(key));
         }

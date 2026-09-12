@@ -1,13 +1,17 @@
 //! 安装/修复/启动服务的工作流（后台线程 + 步骤事件 + 失败回滚）。
 
-use std::path::PathBuf;
 use std::sync::mpsc::Sender;
 use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context, Result};
 
-use crate::service::{self, Credential, InstallRequest};
+use crate::service::{
+    self, capture_prev_service, install_with_rollback, rollback_install, Credential, InstallRequest,
+};
 use crate::setup::{config_path, install_dir, SetupArgs};
+
+/// 失败回滚实情由 `service` 定义；UI 继续以 `work::RollbackOutcome` 引用。
+pub use crate::service::RollbackOutcome;
 
 /// 工作线程 → UI 的事件（步骤开始 / 步骤完成 / 整体结果）。
 /// 步骤事件都带 `key`（稳定英文标识：UI 匹配、silent 输出）与 `label`（中文 UI 文案）。
@@ -43,10 +47,11 @@ pub const STEP_SHELL_INTEGRATION: &str = "shell_integration";
 pub const STEP_START_SERVICE: &str = "start_service";
 pub const STEP_WAIT_DIAL: &str = "wait_dial";
 pub const STEP_UNINSTALL_STOP_SERVICE: &str = "uninstall_stop_service";
-pub const STEP_UNINSTALL_SERVICE: &str = "uninstall_service";
-pub const STEP_UNINSTALL_EVENT_SOURCE: &str = "uninstall_event_source";
-pub const STEP_UNINSTALL_ENTROPY: &str = "uninstall_entropy";
-pub const STEP_UNINSTALL_AUTOSTART: &str = "uninstall_autostart";
+/// 报告四行键由 `service` 定义（`UninstallReport::rows`），重导出供 UI/silent 使用。
+pub use crate::service::{
+    STEP_UNINSTALL_AUTOSTART, STEP_UNINSTALL_ENTROPY, STEP_UNINSTALL_EVENT_SOURCE,
+    STEP_UNINSTALL_SERVICE,
+};
 pub const STEP_UNINSTALL_PURGE: &str = "uninstall_purge";
 pub const STEP_UNINSTALL_REMOVE_DIR: &str = "uninstall_remove_dir";
 
@@ -75,19 +80,6 @@ pub fn step_label_en(key: &str) -> &str {
 pub enum StepOutcome {
     Done,
     Skipped,
-    Failed(String),
-}
-
-/// 失败后的回滚实情（UI/silent 据此说真话）。
-#[derive(Clone)]
-pub enum RollbackOutcome {
-    /// 没有需要回滚的改动（安装成功，或失败发生在任何改动之前）。
-    NotNeeded,
-    /// 旧服务注册已恢复（或本次新建的服务已删除）；旧服务已尽力启动。
-    Restored,
-    /// 服务原本存在但路径读不出：注册未改动（绝不删除），已尽力重新启动服务。
-    RestoredUnknown,
-    /// 回滚动作失败（含恢复注册后启动失败）。
     Failed(String),
 }
 
@@ -175,6 +167,9 @@ fn run_install(tx: Sender<Ev>, args: SetupArgs, student_id: String, password: Op
 
     // 先记下安装前的服务状态（在解包覆盖之前）——回滚只能依据它。
     let prev = capture_prev_service();
+    // install 核心失败时回滚已在 install_with_rollback 内完成；记下实情，
+    // 收尾不再重复回滚。解包/快捷方式/起服务等后续失败才由收尾回滚。
+    let mut core_rollback: Option<RollbackOutcome> = None;
 
     let result: Result<()> = (|| {
         step(&tx, STEP_STOP_SERVICE, "停止旧服务");
@@ -212,13 +207,19 @@ fn run_install(tx: Sender<Ev>, args: SetupArgs, student_id: String, password: Op
             Some(p) => Credential::Plain(p),
             None => Credential::KeepExisting,
         };
-        service::install_core(InstallRequest {
-            cfg_path: config_path(),
-            student_id: Some(student_id),
-            credential,
-            service_exe: crate::paths::install_exe(),
-            tray_exe: crate::paths::install_exe(),
-        })?;
+        if let Err(f) = install_with_rollback(
+            InstallRequest {
+                cfg_path: config_path(),
+                student_id: Some(student_id),
+                credential,
+                service_exe: crate::paths::install_exe(),
+                tray_exe: crate::paths::install_exe(),
+            },
+            &prev,
+        ) {
+            core_rollback = Some(f.rollback);
+            return Err(f.error);
+        }
         step_done(&tx, STEP_INSTALL_CORE, "写入配置并注册服务");
 
         step(&tx, STEP_SHELL_INTEGRATION, "创建开始菜单快捷方式");
@@ -240,8 +241,15 @@ fn run_install(tx: Sender<Ev>, args: SetupArgs, student_id: String, password: Op
             },
         ),
         Err(e) => {
-            log::error!("Install failed (rolling back): {e:#}");
-            let rollback = rollback_for(&prev);
+            let rollback = match core_rollback {
+                // 核心失败的日志与回滚都在 install_with_rollback 内完成。
+                Some(rb) => rb,
+                None => {
+                    // 后续步骤失败：此刻才回滚（日志文案与旧实现一致）。
+                    log::error!("Install failed (rolling back): {e:#}");
+                    rollback_install(&prev)
+                }
+            };
             emit(
                 &tx,
                 Ev::Done {
@@ -250,71 +258,6 @@ fn run_install(tx: Sender<Ev>, args: SetupArgs, student_id: String, password: Op
                 },
             );
         }
-    }
-}
-
-/// 安装开始前的服务状态：回滚的唯一依据。
-enum PrevService {
-    /// 没有服务：失败时删除本次可能新建的服务（不存在视为成功）。
-    None,
-    /// 有服务且路径已知：失败时恢复注册并尽力启动。
-    Known(PathBuf),
-    /// 有服务但路径读不出：失败时不碰注册，也绝不删除；尽力重新启动服务。
-    Unknown,
-}
-
-fn capture_prev_service() -> PrevService {
-    match service::install_state() {
-        service::InstallState::Installed {
-            service_exe: Some(exe),
-            ..
-        } => PrevService::Known(exe),
-        service::InstallState::Installed {
-            service_exe: None, ..
-        } => PrevService::Unknown,
-        service::InstallState::NotInstalled => PrevService::None,
-    }
-}
-
-/// 失败回滚：恢复旧服务注册（或删除新建服务），并回报回滚实情。
-/// 服务原本存在但路径未知时不动注册（宁可不回滚，也不误删），但尽力把停掉的服务拉起来。
-fn rollback_for(prev: &PrevService) -> RollbackOutcome {
-    match prev {
-        PrevService::Unknown => {
-            log::warn!(
-                "Service existed but its path could not be read; registration left untouched"
-            );
-            match service::start_service() {
-                Ok(()) => RollbackOutcome::RestoredUnknown,
-                Err(e) => {
-                    log::error!(
-                        "Rollback left registration untouched but service start failed: {e:#}"
-                    );
-                    RollbackOutcome::Failed(format!("服务注册未改动，但启动失败：{e:#}"))
-                }
-            }
-        }
-        PrevService::None => match service::delete_service() {
-            Ok(()) => RollbackOutcome::Restored,
-            Err(e) => {
-                log::error!("Rollback delete_service failed: {e:#}");
-                RollbackOutcome::Failed(format!("{e:#}"))
-            }
-        },
-        PrevService::Known(exe) => match service::restore_service_path(&config_path(), exe) {
-            // 旧服务被本次安装停掉了：恢复注册后尽力把它拉起来。
-            Ok(()) => match service::start_service() {
-                Ok(()) => RollbackOutcome::Restored,
-                Err(e) => {
-                    log::error!("Rollback restored registration but service start failed: {e:#}");
-                    RollbackOutcome::Failed(format!("服务注册已恢复，但启动失败：{e:#}"))
-                }
-            },
-            Err(e) => {
-                log::error!("Rollback restore_service_path failed: {e:#}");
-                RollbackOutcome::Failed(format!("{e:#}"))
-            }
-        },
     }
 }
 
@@ -334,32 +277,11 @@ fn run_uninstall(tx: Sender<Ev>, purge: bool, remove_dir: bool) {
         kill_tray();
         step_done(&tx, STEP_UNINSTALL_STOP_SERVICE, "停止服务");
 
-        // uninstall_core 返回分步报告；此处按报告逐行翻译成 UI 行（核心不打印）。
+        // uninstall_core 返回分步报告；按规范行序（service::rows）逐行翻译成 UI 行。
         let report = service::uninstall_core(&config_path(), purge)?;
-        step_finished(
-            &tx,
-            STEP_UNINSTALL_SERVICE,
-            "移除服务",
-            outcome_of(report.service),
-        );
-        step_finished(
-            &tx,
-            STEP_UNINSTALL_EVENT_SOURCE,
-            "移除事件源",
-            outcome_of(report.event_source),
-        );
-        step_finished(
-            &tx,
-            STEP_UNINSTALL_ENTROPY,
-            "移除加密密钥",
-            outcome_of(report.entropy),
-        );
-        step_finished(
-            &tx,
-            STEP_UNINSTALL_AUTOSTART,
-            "移除托盘自启",
-            outcome_of(report.autostart),
-        );
+        for (key, step) in report.rows() {
+            step_finished(&tx, key, label_zh(key), outcome_of(step));
+        }
         if let Some(purge_step) = report.purge {
             step_finished(
                 &tx,
@@ -395,6 +317,17 @@ fn run_uninstall(tx: Sender<Ev>, purge: bool, remove_dir: bool) {
                 },
             );
         }
+    }
+}
+
+/// 报告四行键 → 中文 UI 文案（silent 用 `step_label_en`，不经过这里）。
+fn label_zh(key: &str) -> &str {
+    match key {
+        service::STEP_UNINSTALL_SERVICE => "移除服务",
+        service::STEP_UNINSTALL_EVENT_SOURCE => "移除事件源",
+        service::STEP_UNINSTALL_ENTROPY => "移除加密密钥",
+        service::STEP_UNINSTALL_AUTOSTART => "移除托盘自启",
+        other => other,
     }
 }
 

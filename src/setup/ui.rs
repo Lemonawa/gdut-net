@@ -115,11 +115,13 @@ impl SetupApp {
             // 开始菜单"卸载 GDUT Net"/应用和功能入口：已安装直接进卸载确认。
             Mode::Uninstall => match state {
                 InstallState::Installed { .. } => Page::UninstallConfirm,
-                InstallState::NotInstalled => Page::Maintenance,
+                // 查询失败按未安装处理：卸载入口不冒险出现（维护页无卸载按钮）。
+                InstallState::NotInstalled | InstallState::Unknown => Page::Maintenance,
             },
             Mode::StartService => Page::StartService,
+            // 查询失败按已安装处理：维护页至少给出修复入口，Welcome 会引导一次可能多余的安装。
             _ => match state {
-                InstallState::Installed { .. } => Page::Maintenance,
+                InstallState::Installed { .. } | InstallState::Unknown => Page::Maintenance,
                 InstallState::NotInstalled => Page::Welcome,
             },
         };
@@ -357,7 +359,7 @@ impl SetupApp {
             if ui.button("返回").clicked() {
                 self.error = None;
                 self.page = match self.state {
-                    InstallState::Installed { .. } => Page::Maintenance,
+                    InstallState::Installed { .. } | InstallState::Unknown => Page::Maintenance,
                     InstallState::NotInstalled => Page::Welcome,
                 };
             }
@@ -492,9 +494,13 @@ impl SetupApp {
     }
 
     fn maintenance_page(&mut self, ui: &mut egui::Ui) {
-        let installed = matches!(&self.state, InstallState::Installed { .. });
+        let card = match &self.state {
+            InstallState::Installed { .. } => "已装卡",
+            InstallState::NotInstalled => "未装卡",
+            InstallState::Unknown => "状态未知",
+        };
         ui.horizontal_top(|ui| {
-            self.card_preview(ui, if installed { "已装卡" } else { "未装卡" });
+            self.card_preview(ui, card);
             ui.add_space(16.0);
             ui.vertical(|ui| {
                 ui.set_width(280.0);
@@ -520,6 +526,11 @@ impl SetupApp {
                     }
                     InstallState::NotInstalled => {
                         ui.label("GDUT Net 尚未安装。修复安装会重新解包文件并注册服务。");
+                    }
+                    InstallState::Unknown => {
+                        ui.label(
+                            "无法读取服务状态（服务管理器不可达或查询失败）。修复安装会重新解包文件并注册服务。",
+                        );
                     }
                 }
             });

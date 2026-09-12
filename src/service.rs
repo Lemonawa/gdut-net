@@ -68,9 +68,12 @@ mod win {
             service_exe: Option<PathBuf>,
             version: Option<String>,
         },
+        /// SCM 不可达或查询失败（非"不存在"）：既不能当已安装，也不能当未安装。
+        Unknown,
     }
 
     /// 卸载分步结果：Done=执行成功，Skipped=幂等跳过，Failed=失败但被容忍。
+    #[derive(Clone)]
     pub enum Step {
         Done,
         Skipped,
@@ -90,6 +93,53 @@ mod win {
         pub entropy: Step,
         pub autostart: Step,
         pub purge: Option<PurgeStep>,
+    }
+
+    /// 四个卸载步骤键（GUI/silent/报告行共用；`setup::work` 重导出）。
+    pub const STEP_UNINSTALL_SERVICE: &str = "uninstall_service";
+    pub const STEP_UNINSTALL_EVENT_SOURCE: &str = "uninstall_event_source";
+    pub const STEP_UNINSTALL_ENTROPY: &str = "uninstall_entropy";
+    pub const STEP_UNINSTALL_AUTOSTART: &str = "uninstall_autostart";
+
+    impl UninstallReport {
+        /// 规范行序（服务/事件源/密钥/自启），GUI 与 silent 共用。
+        pub fn rows(&self) -> [(&'static str, Step); 4] {
+            [
+                (STEP_UNINSTALL_SERVICE, self.service.clone()),
+                (STEP_UNINSTALL_EVENT_SOURCE, self.event_source.clone()),
+                (STEP_UNINSTALL_ENTROPY, self.entropy.clone()),
+                (STEP_UNINSTALL_AUTOSTART, self.autostart.clone()),
+            ]
+        }
+    }
+
+    /// 安装前服务状态（回滚依据）。
+    pub enum PrevService {
+        /// 没有服务：失败时删除本次可能新建的服务（不存在视为成功）。
+        None,
+        /// 有服务且路径已知：失败时恢复注册并尽力启动。
+        Known(PathBuf),
+        /// 有服务但路径读不出（或查询失败）：失败时不碰注册，也绝不删除；尽力重新启动服务。
+        Unknown,
+    }
+
+    /// 失败后的回滚实情（UI/silent 据此说真话）。
+    #[derive(Clone)]
+    pub enum RollbackOutcome {
+        /// 没有需要回滚的改动（安装成功，或失败发生在任何改动之前）。
+        NotNeeded,
+        /// 旧服务注册已恢复（或本次新建的服务已删除）；旧服务已尽力启动。
+        Restored,
+        /// 服务原本存在但路径读不出：注册未改动（绝不删除），已尽力重新启动服务。
+        RestoredUnknown,
+        /// 回滚动作失败（含恢复注册后启动失败）。
+        Failed(String),
+    }
+
+    /// 安装核心失败：原始错误 + 已执行的回滚实情（调用方照实陈述）。
+    pub struct InstallFailure {
+        pub error: anyhow::Error,
+        pub rollback: RollbackOutcome,
     }
 
     /// install 入口（`gdut-net install [--keep-password]`）：提示与输出在壳内，核心不打印。
@@ -115,13 +165,28 @@ mod win {
         } else {
             None
         };
-        let outcome = install_core(InstallRequest {
-            cfg_path: cfg_path.to_path_buf(),
-            student_id,
-            credential,
-            service_exe: std::env::current_exe()?,
-            tray_exe: std::env::current_exe()?,
-        })?;
+        // 安装前状态是回滚的唯一依据；core 失败时 service 负责回滚并回报实情。
+        let prev = capture_prev_service();
+        let outcome = match install_with_rollback(
+            InstallRequest {
+                cfg_path: cfg_path.to_path_buf(),
+                student_id,
+                credential,
+                service_exe: std::env::current_exe()?,
+                tray_exe: std::env::current_exe()?,
+            },
+            &prev,
+        ) {
+            Ok(outcome) => outcome,
+            Err(f) => {
+                // 失败路径新行（成功输出逐字不变）；回滚实情逐行照实打印（英文）。
+                eprintln!("Install failed: {}", f.error);
+                if let Some(line) = rollback_line_en(&f.rollback) {
+                    eprintln!("{line}");
+                }
+                return Err(f.error);
+            }
+        };
 
         // 旧输出逐字保留（服务已存在时先回显 create_service 的旧行）；拨号条目信息从落盘配置重读。
         if outcome.service_refreshed {
@@ -212,13 +277,103 @@ mod win {
         })
     }
 
-    /// 服务是否已安装（不可查也视作未安装，setup 幂等容忍）。
-    /// `query_config` 读到的是整串 `lpBinaryPathName`（exe + 参数，可能带引号），
-    /// 这里剥出纯 exe 路径；读不出时 `service_exe: None`（存在但未知）。
+    /// 安装核心；失败立即按 `prev` 回滚，把回滚实情一并回报（CLI 与 setup 共用）。
+    pub fn install_with_rollback(
+        req: InstallRequest,
+        prev: &PrevService,
+    ) -> Result<InstallOutcome, InstallFailure> {
+        match install_core(req) {
+            Ok(outcome) => Ok(outcome),
+            Err(error) => {
+                log::error!("Install failed (rolling back): {error:#}");
+                let rollback = rollback_install(prev);
+                Err(InstallFailure { error, rollback })
+            }
+        }
+    }
+
+    /// 安装开始前的服务状态：回滚的唯一依据。
+    pub fn capture_prev_service() -> PrevService {
+        match install_state() {
+            InstallState::Installed {
+                service_exe: Some(exe),
+                ..
+            } => PrevService::Known(exe),
+            InstallState::Installed {
+                service_exe: None, ..
+            } => PrevService::Unknown,
+            // 未安装与查询失败都按"不动注册、尽力启动"处理：查询失败时
+            // 误删真实服务的代价远高于漏回滚。
+            InstallState::NotInstalled | InstallState::Unknown => PrevService::Unknown,
+        }
+    }
+
+    /// 失败回滚：恢复旧服务注册（或删除新建服务），并回报回滚实情。
+    /// 服务原本存在但路径未知时不动注册（宁可不回滚，也不误删），但尽力把停掉的服务拉起来。
+    pub fn rollback_install(prev: &PrevService) -> RollbackOutcome {
+        match prev {
+            PrevService::Unknown => {
+                log::warn!(
+                    "Service existed but its path could not be read; registration left untouched"
+                );
+                match start_service() {
+                    Ok(()) => RollbackOutcome::RestoredUnknown,
+                    Err(e) => {
+                        log::error!(
+                            "Rollback left registration untouched but service start failed: {e:#}"
+                        );
+                        RollbackOutcome::Failed(format!("服务注册未改动，但启动失败：{e:#}"))
+                    }
+                }
+            }
+            PrevService::None => match delete_service() {
+                Ok(()) => RollbackOutcome::Restored,
+                Err(e) => {
+                    log::error!("Rollback delete_service failed: {e:#}");
+                    RollbackOutcome::Failed(format!("{e:#}"))
+                }
+            },
+            PrevService::Known(exe) => {
+                match restore_service_path(Path::new(crate::paths::CONFIG_PATH), exe) {
+                    // 旧服务被本次安装停掉了：恢复注册后尽力把它拉起来。
+                    Ok(()) => match start_service() {
+                        Ok(()) => RollbackOutcome::Restored,
+                        Err(e) => {
+                            log::error!(
+                                "Rollback restored registration but service start failed: {e:#}"
+                            );
+                            RollbackOutcome::Failed(format!("服务注册已恢复，但启动失败：{e:#}"))
+                        }
+                    },
+                    Err(e) => {
+                        log::error!("Rollback restore_service_path failed: {e:#}");
+                        RollbackOutcome::Failed(format!("{e:#}"))
+                    }
+                }
+            }
+        }
+    }
+
+    /// 控制台英文回滚行（CLI 与 silent 共用；None = 无需打印）。
+    pub fn rollback_line_en(outcome: &RollbackOutcome) -> Option<String> {
+        match outcome {
+            RollbackOutcome::NotNeeded => None,
+            RollbackOutcome::Restored => Some("Rolled back to the previous service.".to_string()),
+            RollbackOutcome::RestoredUnknown => Some(
+                "Service existed but its path was unreadable; registration untouched, service restarted."
+                    .to_string(),
+            ),
+            // 回滚失败详情可能含中文（核心/GUI 文案）：英文标签 + 原文，不翻译。
+            RollbackOutcome::Failed(r) => Some(format!("ROLLBACK FAILED: {r}")),
+        }
+    }
+
+    /// 服务是否已安装（三态：SCM 不可达/查询失败不再冒充"未安装"）。
+    /// `service_exe: None` = 服务存在但配置读取失败、路径未知（存在但未知）。
     pub fn install_state() -> InstallState {
         let Ok(mgr) = ServiceManager::local_computer(None::<&str>, ServiceManagerAccess::CONNECT)
         else {
-            return InstallState::NotInstalled;
+            return InstallState::Unknown;
         };
         let access = ServiceAccess::QUERY_STATUS | ServiceAccess::QUERY_CONFIG;
         match mgr.open_service(SERVICE_NAME, access) {
@@ -241,7 +396,13 @@ mod win {
                     version: crate::shell::installed_version(),
                 },
             },
-            Err(_) => InstallState::NotInstalled,
+            // 仅"Service not found"是"未安装"；拒绝访问等真实错误是"未知"。
+            Err(windows_service::Error::Winapi(e))
+                if e.raw_os_error() == Some(ERROR_SERVICE_DOES_NOT_EXIST.0 as i32) =>
+            {
+                InstallState::NotInstalled
+            }
+            Err(_) => InstallState::Unknown,
         }
     }
 
@@ -692,9 +853,12 @@ mod win {
 
 #[cfg(windows)]
 pub use win::{
-    delete_service, existing_account, install, install_core, install_state, restore_service_path,
-    service_main, start_service, stop_service, uninstall, uninstall_core, Credential,
-    InstallOutcome, InstallRequest, InstallState, PurgeStep, Step, UninstallReport,
+    capture_prev_service, delete_service, existing_account, install, install_core, install_state,
+    install_with_rollback, restore_service_path, rollback_install, rollback_line_en, service_main,
+    start_service, stop_service, uninstall, uninstall_core, Credential, InstallFailure,
+    InstallOutcome, InstallRequest, InstallState, PrevService, PurgeStep, RollbackOutcome, Step,
+    UninstallReport, STEP_UNINSTALL_AUTOSTART, STEP_UNINSTALL_ENTROPY, STEP_UNINSTALL_EVENT_SOURCE,
+    STEP_UNINSTALL_SERVICE,
 };
 
 #[cfg(windows)]

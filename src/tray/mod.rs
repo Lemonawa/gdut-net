@@ -100,7 +100,9 @@ pub fn has_console() -> bool {
 pub fn double_click_entry() -> Result<()> {
     match crate::service::install_state() {
         crate::service::InstallState::Installed { .. } => run_tray(true),
-        crate::service::InstallState::NotInstalled => {
+        // 查询失败（Unknown）走与未安装相同的提示：查不到服务时给安装提示
+        // 无害（重装幂等），误判"已安装"去起托盘则更糟（服务不在，托盘只能空等）。
+        crate::service::InstallState::NotInstalled | crate::service::InstallState::Unknown => {
             message_box_install_hint();
             Ok(())
         }
