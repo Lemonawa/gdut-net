@@ -21,10 +21,10 @@ use crate::ipc::protocol::{
     WirelessSnapshot,
 };
 use crate::probe::ProbeVerdict;
-use crate::watchdog::{SessionView, LINK_DOWN_RETRY};
+use crate::watchdog::SessionView;
 use crate::wireless::{portal, Action, Brain, World, JOIN_TIMEOUT_SECS};
 
-/// 已知链路可用时的链路轮询间隔（既有 2s 节拍）。
+/// 链路轮询间隔（既有 2s 节拍；拔线期间同样 2s，插线检测 ≤2s）。
 const LINK_POLL_MS: u64 = 2_000;
 /// 无线世界采样节拍（既有 manager 2s 拍）。
 const WIRELESS_TICK_MS: u64 = 2_000;
@@ -238,11 +238,10 @@ pub struct Reaction {
 }
 
 /// 服务总控（守护 + 无线接管 + 事件环 + 快照的组合决策点）。
-/// 不 derive Debug/Clone（内部持有密码明文）。
+/// 不 derive Debug/Clone（内部持有 `Config` 与可变账本）。
 pub struct Supervisor {
     clock: Box<dyn Clock>,
     cfg: Config,
-    password: String,
     // 生命周期
     started: bool,
     stopped: bool,
@@ -283,12 +282,11 @@ pub struct Supervisor {
 }
 
 impl Supervisor {
-    pub fn new(cfg: Config, password: String, clock: impl Clock + 'static) -> Self {
+    pub fn new(cfg: Config, clock: impl Clock + 'static) -> Self {
         let mode = cfg.wireless.mode;
         let mut sup = Self {
             clock: Box::new(clock),
             cfg,
-            password,
             started: false,
             stopped: false,
             mode,
@@ -352,11 +350,6 @@ impl Supervisor {
             }
         }
         sup
-    }
-
-    /// 明文密码唯一所有者（Task 9 的无线 worker 构建 portal URL 用；绝不日志/Debug）。
-    pub fn password(&self) -> &str {
-        &self.password
     }
 
     /// 纯同步 reducer：任意事件序不 panic、不返回 Err。
@@ -438,15 +431,6 @@ impl Supervisor {
         Some(next.max(now))
     }
 
-    /// 已知链路态下的轮询间隔：拔线用 watchdog 的 5s 节奏。
-    fn link_poll_interval_ms(&self) -> u64 {
-        if self.eth_link == Some(false) {
-            duration_ms(LINK_DOWN_RETRY)
-        } else {
-            LINK_POLL_MS
-        }
-    }
-
     fn handle_started(&mut self, now: u64, wall: u64, effects: &mut Vec<Effect>) {
         self.started = true;
         self.events.push(
@@ -466,17 +450,19 @@ impl Supervisor {
     }
 
     fn handle_wake(&mut self, now: u64, effects: &mut Vec<Effect>) {
-        // (a) 到点的 watchdog deadline：先做一笔新鲜链路采样再步进（I5），
-        // 拔线期间作废（待 false→true 边沿）。
+        // (a) 到点的 watchdog deadline：先做一笔新鲜链路采样再步进（I5）。
+        // 拔线不豁免步进——安全闸在 `Watchdog::do_dial` 内部（`Some(false)`
+        // 时置 Backoff/Ethernet link down 并返回 5s，绝不触碰拨号端口）；
+        // 停滞步进会让会话状态永远停在 Connected（与旧 runtime 不一致，R1）。
         if self.watchdog_deadline.is_some_and(|d| d <= now) {
             self.watchdog_deadline = None;
-            self.step_pending = self.eth_link != Some(false);
+            self.step_pending = true;
         }
         if self.step_pending || self.link_poll_at <= now {
             if !self.sample_in_flight {
                 effects.push(Effect::SampleLink);
                 self.sample_in_flight = true;
-                self.link_poll_at = now + self.link_poll_interval_ms();
+                self.link_poll_at = now + LINK_POLL_MS;
             } else if self.link_poll_at <= now {
                 // 结果缺席：只推账本，绝不重发在飞效果（I11）。
                 self.link_poll_at = now + SAMPLE_RETRY_MS;
@@ -542,10 +528,9 @@ impl Supervisor {
             }
             effects.push(Effect::SetWatchdogLink(next));
             if next == Some(false) {
-                // 拔线：停步进（I5），等链路恢复边沿；5s 轮询。
-                self.watchdog_deadline = None;
-                self.step_pending = false;
-                self.link_poll_at = now + duration_ms(LINK_DOWN_RETRY);
+                // 拔线：轮询保持 2s（插线检测 ≤2s）；到点的步进照常由
+                // watchdog 自身门控（R1/R2），此处不豁免也不改 deadline。
+                self.link_poll_at = now + LINK_POLL_MS;
             } else if old == Some(false) {
                 // 插线即拨（I3(c)）。
                 log::info!("Ethernet link restored, redialing immediately");
@@ -559,19 +544,15 @@ impl Supervisor {
                 self.link_poll_at = now + LINK_POLL_MS;
             }
         } else {
-            self.link_poll_at = now + self.link_poll_interval_ms();
+            self.link_poll_at = now + LINK_POLL_MS;
         }
 
-        // 若这笔采样服务于到点的 watchdog deadline：链路可用则步进（I5）。
+        // 若这笔采样服务于到点的 watchdog deadline：不论链路态都步进
+        // （R1：安全闸在 `Watchdog::do_dial`，拔线时产出 gated 的
+        // Backoff/Ethernet link down + 5s，绝不拨号）。
         if self.step_pending {
-            if self.eth_link == Some(false) {
-                self.step_pending = false;
-                self.watchdog_deadline = None;
-                self.link_poll_at = now + duration_ms(LINK_DOWN_RETRY);
-            } else {
-                effects.push(Effect::StepWatchdog);
-                self.step_pending = false;
-            }
+            effects.push(Effect::StepWatchdog);
+            self.step_pending = false;
         }
     }
 

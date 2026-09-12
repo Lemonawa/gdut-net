@@ -290,10 +290,10 @@ pub struct Reaction {
 }
 
 /// 服务总控（守护 + 无线接管 + 事件环 + 快照的组合决策点）。
-/// 不 derive Debug/Clone（内部持有密码明文）。
+/// 不 derive Debug/Clone（内部持有 `Config` 与可变账本）。
 pub struct Supervisor { /* private */ }
 impl Supervisor {
-    pub fn new(cfg: Config, password: String, clock: impl Clock + 'static) -> Self;
+    pub fn new(cfg: Config, clock: impl Clock + 'static) -> Self;
     pub fn on(&mut self, event: Event) -> Reaction;   // 纯同步；任意序列不 panic、不返回 Err
     pub fn snapshot(&self) -> StateSnapshot;          // watch 通道初值
 }
@@ -319,7 +319,7 @@ impl Watchdog { pub fn view(&self) -> SessionView; }
 2. **I2 快照单出口**：快照只经 `Reaction.snapshot` 离开核；壳侧只有一个 `snap_tx.send` 调用点。
 3. **I3 状态机节拍**：`Effect::StepWatchdog` 只可能来自 (a) 到点的 `Wake`、(b) `Command::Redial`、(c) 链路 false→true 边沿。心跳/无线/事件环类事件永不触发它（79 次重拨事故结构性不可能）。
 4. **I4 车道**：同车道效果严格顺序执行；效果结果只经 Event 回灌；Main 车道与事件处理同步（等价今天的 run_once 独占），Wireless 车道在 worker 中执行（等价今天的 manager 任务）。
-5. **I5 链路门控**：已知链路态只接受 `Some(_)` 覆盖（首次采样例外）；拔线期间（`Some(false)`）不产生 `StepWatchdog`；`Wake` 触发的步进在同一反应链里先 `SampleLink`（收窄：不等 2s 采样窗口）。
+5. **I5 链路门控**：已知链路态只接受 `Some(_)` 覆盖（首次采样例外）；拔线期间**绝不拨号**（`Watchdog` 自身 `Some(false)` 门控保证端口不被触碰）；到点的 watchdog 步进照常执行，会话状态如实转 `Backoff`/`Ethernet link down`（与旧 runtime 一致）；`Wake` 触发的步进在同一反应链里先 `SampleLink`（收窄：不等 2s 采样窗口）。
 6. **I6 无线生命周期**：`EnsureRoutes` 只在 `PortalAuth` 且 wlan IP+网关齐备时、`Settle` 之前发出；`TeardownRoutes` 在 `Disassociate`、`Stop`（以及 worker 的 `RouteGuard::drop` 兜底）发出；metric 压制仅 standby 或 exclusive 且有线不健康，exclusive+有线健康时释放；`verdict` 在每次认证尝试后与 `Disassociate` 清空、只由 `WlanProbeFinished` 设置（过去的无限重认证 Critical）；Joining 超时 60s → `brain.restart()`。
 7. **I7 绝对唤醒**：`wake_at`/`link_poll_at`/`wireless_tick_at` 都是绝对毫秒；`Wake` 只重新判定哪些 deadline 到点；事件频率不影响任何 deadline。
 8. **I8 通知节流**：`Notify` 仅在 per-key 30 分钟窗口过期时发出；窗口只在 `NotifyResult{delivered:true}` 后开启；重拨失败 10 分钟阈值与拔线暂停豁免保持现状。
@@ -332,7 +332,7 @@ impl Watchdog { pub fn view(&self) -> SessionView; }
 - [ ] **Step 1: `Watchdog::view()`**（`src/watchdog.rs`）：实现 `SessionView` + `view()`（从现有字段直读）；在 `tests/watchdog.rs` 增一条 `view()` 与 `snapshot()` 有线字段一致的测试（`snapshot()` 保留）。
 - [ ] **Step 2: 写 interface 骨架 + 最早 3 个场景**（`src/supervisor.rs` + `tests/supervisor.rs`）：协议类型 + `Supervisor::new/on/snapshot` 的签名与 `todo!()` 级实现；harness（`FakeClock`、脚本化采样、效果记录、内联执行 Main 车道并驱动真 `Watchdog`）；场景：
   1. `started_then_first_wake_dials`：`Started` → 首拍先 `SampleLink`，`Wake` 后 `[SampleLink, SetWatchdogLink?, StepWatchdog]`（顺序断言，I3/I5）；
-  2. `cable_out_never_dials`：`LinkSampled(Some(false))` 后到点 `Wake` 无 `StepWatchdog`、`wake_at=+5s`（I5）；
+  2. `cable_out_never_dials`：`LinkSampled(Some(false))` 后轮询保持 2s（`wake_at=+2s`）；到点 `Wake` 照常 `[SampleLink, SetWatchdogLink(Some(false)), StepWatchdog]`，watchdog 门控产出 `Backoff` + `Ethernet link down`（`Dial` 计数 0，gated 步进自排 `+5s`）（I5/R2）；
   3. `link_restore_redials_immediately`：`Some(false)→Some(true)` 边沿 → `[SetWatchdogLink(Some(true)), RequestRedial, StepWatchdog]` + 事件环行（I3/I5）。
   跑测试：RED（未实现）→ 实现到绿。
 
@@ -373,11 +373,11 @@ impl Watchdog { pub fn view(&self) -> SessionView; }
   `RequestRedial` → `watchdog.request_redial()`；`SetWatchdogLink` → `watchdog.set_eth_link(up)`；`Hangup` → `watchdog.shutdown().await`；
   `SampleLink` → `spawn_blocking(adapter::ethernet_link_up)` → `LinkSampled`；`SampleWireless` → 一次 `spawn_blocking`（`wlan::associated` + `adapter::wlan_adapter` 采样为 `WlanSample`）→ `WirelessSampled`；
   `PersistMode` → `cfg.wireless.mode` + `cfg.save`（失败仅 warning）；`Notify` → `notify::toast` → `NotifyResult{delivered}`。
-- [ ] **Step 3: 无线 worker**：`LaneMsg::{Effect, Shutdown}`；拥有 `RouteGuard`；`Associate` → `wlan::associate(profile)` → `AssociateFinished`；`PortalAuth{src_ip,timeout}` → `portal::build_login_url`（cfg+密码）+ 脱敏日志 + `timeout` 包裹 `portal::portal_get` → `PortalFinished`（`Replied/NoReply/TimedOut/Failed`）；`WlanProbe` → `probe::probe_once` → `WlanProbeFinished`；`EnsureRoutes/SuppressMetric/ReleaseMetric/TeardownRoutes/CleanupStaleRoutes` → `RouteGuard`/`routes`；`Disassociate` → `wlan::disassociate`；`Settle` → `tokio::time::sleep`（与 stop 竞争）。worker 退出时 `RouteGuard::drop` 兜底。
+- [ ] **Step 3: 无线 worker**：`LaneMsg::{Effect, Shutdown}`；拥有 `RouteGuard`；`Associate` → `wlan::associate(profile)` → `AssociateFinished`；`PortalAuth{src_ip,timeout}` → `portal::build_login_url`（cfg + 壳侧 `pass`）+ 脱敏日志 + `timeout` 包裹 `portal::portal_get` → `PortalFinished`（`Replied/NoReply/TimedOut/Failed`）；`WlanProbe` → `probe::probe_once` → `WlanProbeFinished`；`EnsureRoutes/SuppressMetric/ReleaseMetric/TeardownRoutes/CleanupStaleRoutes` → `RouteGuard`/`routes`；`Disassociate` → `wlan::disassociate`；`Settle` → `tokio::time::sleep`（与 stop 竞争）。worker 退出时 `RouteGuard::drop` 兜底。
 - [ ] **Step 4: 主循环 select**（顺序即优先级）：`stop.cancelled()` → `Event::Stop` 并跳出；`cmd_rx.recv()` → `Command`；`hb_rx.changed()` → `Heartbeat`；`wl_rx.recv()` → worker 回灌事件（`None` → `WirelessDied`）；`sleep_until(wake_at)` → `Wake`。每轮：`let r = core.on(ev); wake_at = r.wake_at; if let Some(s)=r.snapshot { snap_tx.send(s) }`（唯一发布点）；Main 效果内联执行、结果事件同轮递推回灌（用 `VecDeque` 队列，避免递归）；Wireless 效果发 worker。
 - [ ] **Step 5: 停止握手**：`core.on(Event::Stop)` → 发布（若有）→ Main 效果不可取消执行（`Hangup`）→ 向 worker 发 `Shutdown(teardown 效果)` 并等待其退出；`runtime.shutdown_timeout(10s)` 保持。
 - [ ] **Step 6: 删除旧物**：`wireless_manager`、`ManagerCfg`、`mode_tx/wired_tx/wl_tx/ev_tx` 与对应 `rx`、`compose`、`Notifier`/`failing_since`（已进核心）、`wake_at`/`link_tick` 手摆、`mode_text`（若只被旧代码用）；`Watchdog::snapshot()`/`eth_link()`；同步 `tests/watchdog.rs`。
-- [ ] **Step 7: 行为冻结评审清单**（评审者逐条对照）：拔线不拨号 + 5s 轮询；插线即拨；退避不被事件切碎；接管去抖/让位 10s；/32 路由三出口 + 启动清残留；verdict 清空；join 60s 超时；事件环文案（`Service started, mode …` / `Ethernet link restored, redialing` / `Wireless: …`）逐字；重拨失败 10 分钟 toast 与拔线豁免；SetMode 落盘 + 事件；快照单出口；停止时 hangup + teardown + disassociate；`start_all` 签名与 `service_main` 不变。
+- [ ] **Step 7: 行为冻结评审清单**（评审者逐条对照）：拔线不拨号 + 2s 轮询（gated 步进 5s）；插线即拨；退避不被事件切碎；接管去抖/让位 10s；/32 路由三出口 + 启动清残留；verdict 清空；join 60s 超时；事件环文案（`Service started, mode …` / `Ethernet link restored, redialing` / `Wireless: …`）逐字；重拨失败 10 分钟 toast 与拔线豁免；SetMode 落盘 + 事件；快照单出口；停止时 hangup + teardown + disassociate；`start_all` 签名与 `service_main` 不变。
 - [ ] **Step 8: 全量 gates**（含交叉编译）；`git grep` 确认无残留引用。
 - [ ] **Step 9: Commit** — `refactor(runtime): supervisor executes decisions; delete placeholder snapshot`
 

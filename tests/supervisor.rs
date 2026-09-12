@@ -173,6 +173,10 @@ struct Harness {
 
 impl Harness {
     fn new(cfg: Config, failing: bool) -> Self {
+        Self::with_probe(cfg, failing, vec![ProbeVerdict::Alive])
+    }
+
+    fn with_probe(cfg: Config, failing: bool, verdicts: Vec<ProbeVerdict>) -> Self {
         let clock = FakeClock::new();
         let dial_calls = Arc::new(AtomicU32::new(0));
         let dialer = MockDialer {
@@ -182,7 +186,7 @@ impl Harness {
         };
         let wd = Watchdog::new(
             dialer,
-            MockProber(vec![ProbeVerdict::Alive]),
+            MockProber(verdicts),
             WatchdogCfg {
                 redial_min: Duration::from_secs(1),
                 redial_max: Duration::from_secs(300),
@@ -190,7 +194,7 @@ impl Harness {
                 auth_fail_delay: Duration::from_secs(600),
             },
         );
-        let sup = Supervisor::new(cfg, "s3cret".into(), clock.clone());
+        let sup = Supervisor::new(cfg, clock.clone());
         Self {
             sup,
             clock,
@@ -348,37 +352,111 @@ async fn started_then_first_wake_dials() {
 
 #[tokio::test]
 async fn cable_out_never_dials() {
-    let mut h = Harness::new(wired_cfg(), false);
-    h.start_and_connect().await;
+    // 拨号失败让 watchdog 停在拨号路径（do_dial）：拔线安全闸正是 `do_dial`
+    // 内部的 `eth_link == Some(false)` 分支（置 Backoff/Ethernet link down + 5s）。
+    let mut h = Harness::new(wired_cfg(), true);
+    h.push(Event::Started).await;
+    h.advance_to_wake().await; // t=0：拨号失败 → Backoff，delay=1s
+    assert_eq!(h.dial_calls.load(Ordering::SeqCst), 1);
     h.take_effects();
 
-    // 2s 链路轮询发现拔线：只更新门控，不步进。
-    h.clock.advance(2_000);
+    // 到点前拔线：步进照常执行，先以新鲜采样喂 watchdog 门控（R1）。
     h.world.link = Some(false);
-    h.push(Event::Wake).await;
+    h.advance_to_wake().await; // t=1s：deadline 到点
     assert_eq!(
         h.take_effects(),
-        vec![Effect::SampleLink, Effect::SetWatchdogLink(Some(false))]
+        vec![
+            Effect::SampleLink,
+            Effect::SetWatchdogLink(Some(false)),
+            Effect::StepWatchdog,
+        ],
+        "R1: cable-out does not exempt the scheduled step"
     );
-    assert_eq!(
-        h.wake_at,
-        Some(h.clock.now() + 5_000),
-        "cable-out polls every 5s (LINK_DOWN_RETRY)"
-    );
-
-    // 到点 Wake：不产生 StepWatchdog，拨号计数不变。
-    h.advance_to_wake().await;
-    let effects = h.take_effects();
-    assert!(
-        !effects.iter().any(|e| matches!(e, Effect::StepWatchdog)),
-        "I5: no StepWatchdog while cable is out: {effects:?}"
-    );
-    assert_eq!(effects, vec![Effect::SampleLink]);
-    assert_eq!(h.wake_at, Some(h.clock.now() + 5_000));
     assert_eq!(
         h.dial_calls.load(Ordering::SeqCst),
         1,
-        "cable out never dials"
+        "R1: gated step never dials"
+    );
+    let snap = h.sup.snapshot();
+    assert_eq!(snap.status, SessionStatus::Backoff);
+    assert_eq!(
+        snap.last_drop_reason.as_deref(),
+        Some("Ethernet link down"),
+        "session state honestly reflects the gated step"
+    );
+
+    // R2：拔线轮询保持 2s（`wake_at=+2s`，纯轮询拍只有 SampleLink）；
+    // gated 步进自排 5s（LINK_DOWN_RETRY）——t=1s 的步进 → t=6s 下一步进。
+    assert_eq!(h.wake_at, Some(h.clock.now() + 2_000));
+    h.advance_to_wake().await; // t=3s：纯轮询
+    assert_eq!(h.take_effects(), vec![Effect::SampleLink]);
+    h.advance_to_wake().await; // t=5s：纯轮询
+    assert_eq!(h.take_effects(), vec![Effect::SampleLink]);
+    h.advance_to_wake().await; // t=6s：gated 步进到点（1s + 5s）
+    assert_eq!(h.clock.now(), 6_000);
+    assert_eq!(
+        h.take_effects(),
+        vec![Effect::SampleLink, Effect::StepWatchdog]
+    );
+    assert_eq!(h.dial_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(h.sup.snapshot().status, SessionStatus::Backoff);
+    assert_eq!(h.wake_at, Some(h.clock.now() + 2_000));
+}
+
+#[tokio::test]
+async fn cable_out_connected_session_steps_to_gated_backoff() {
+    // 会话在线时拔线（concern 1 回归）：到点步进走探测路径，双探测失败后
+    // hangup → do_dial 门控 → Backoff/Ethernet link down；全程不新增拨号。
+    let mut h = Harness::with_probe(
+        wired_cfg(),
+        false,
+        vec![ProbeVerdict::LinkDown, ProbeVerdict::LinkDown],
+    );
+    h.start_and_connect().await; // t=0：Connected，deadline=30s
+    assert_eq!(h.dial_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(h.sup.snapshot().status, SessionStatus::Connected);
+    h.take_effects();
+
+    h.world.link = Some(false);
+    h.run_until(30_000).await; // 拔线后到点：第一次探测异常（复核 7.5s）
+    assert!(h
+        .take_effects()
+        .iter()
+        .any(|e| matches!(e, Effect::StepWatchdog)));
+    assert_eq!(
+        h.sup.snapshot().status,
+        SessionStatus::Connected,
+        "single anomaly only rechecks (watchdog semantics)"
+    );
+    assert_eq!(h.dial_calls.load(Ordering::SeqCst), 1);
+
+    // 复核窗口内的 2s 轮询拍（32s/34s/36s）不步进。
+    for _ in 0..3 {
+        h.advance_to_wake().await;
+        assert!(
+            !h.take_effects()
+                .iter()
+                .any(|e| matches!(e, Effect::StepWatchdog)),
+            "no step before the recheck deadline"
+        );
+    }
+    h.advance_to_wake().await; // 37.5s：第二次探测失败 → gated drop
+    assert_eq!(h.clock.now(), 37_500);
+    assert!(h
+        .take_effects()
+        .iter()
+        .any(|e| matches!(e, Effect::StepWatchdog)));
+    assert_eq!(
+        h.dial_calls.load(Ordering::SeqCst),
+        1,
+        "R1: gated do_dial never touches the port"
+    );
+    let snap = h.sup.snapshot();
+    assert_eq!(snap.status, SessionStatus::Backoff);
+    assert_eq!(
+        snap.last_drop_reason.as_deref(),
+        Some("Ethernet link down"),
+        "wired state transitions instead of staying Connected"
     );
 }
 
@@ -832,13 +910,6 @@ async fn manual_redial_steps_immediately() {
 }
 
 #[test]
-fn password_is_held_for_the_shell() {
-    // Supervisor 是明文密码唯一所有者（Task 9 worker 构建 portal URL 用）。
-    let sup = Supervisor::new(wired_cfg(), "s3cret".into(), FakeClock::new());
-    assert_eq!(sup.password(), "s3cret");
-}
-
-#[test]
 fn every_effect_has_exactly_one_lane() {
     let main = vec![
         Effect::StepWatchdog,
@@ -1122,7 +1193,7 @@ async fn metric_suppress_release_by_mode_and_wired_health() {
         "exclusive + unhealthy suppresses metric"
     );
 
-    // 插线恢复健康 → 再释放（拔线期间链路轮询 5s，恢复检测在下一个轮询拍）。
+    // 插线恢复健康 → 再释放（拔线期间链路轮询 2s，恢复检测在下一个轮询拍）。
     h.world.link = Some(true);
     h.run_until(10_000).await;
     assert!(
