@@ -160,7 +160,8 @@ mod win {
     }
 
     /// HTTP GET 探测（HTTP/1.0，不跟随重定向），返回 (状态码, Location 小写)。
-    /// 薄包装 `crate::http::get`：socket/解析/超时等任何失败 → None + debug 日志。
+    /// 薄包装 `crate::http::get`：socket/解析/超时等任何失败 → None + debug 日志；
+    /// AcceptPartial：读错误但已有字节时仍用已收到的应答判状态（旧行为等价）。
     fn http_get_probe(src_ip: Ipv4Addr, http_url: &str) -> Option<(u16, String)> {
         let req = crate::http::Request {
             url: http_url,
@@ -168,6 +169,7 @@ mod win {
             user_agent: "gdut-net-probe",
             timeout: HTTP_TIMEOUT,
             max_bytes: HTTP_MAX_RESPONSE,
+            read_policy: crate::http::ReadPolicy::AcceptPartial,
         };
         match crate::http::get(&req) {
             Ok(r) => Some((r.status, r.location_lower)),

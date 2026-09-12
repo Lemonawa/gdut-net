@@ -1,4 +1,4 @@
-use gdut_net::http::{is_auth_redirect, parse_status_code, parse_url};
+use gdut_net::http::{is_auth_redirect, parse_status_code, parse_url, read_acceptable, ReadPolicy};
 
 #[test]
 fn parse_url_splits_host_port_path() {
@@ -39,4 +39,18 @@ fn auth_redirect_keywords() {
     assert!(is_auth_redirect("http://1.1.1.1/nexturl=..."));
     assert!(is_auth_redirect("http://portal.gdut.edu.cn/"));
     assert!(!is_auth_redirect("http://www.example.com/"));
+}
+
+#[test]
+fn read_policy_decides_partial_reads() {
+    // Complete（portal）：任何读错误都算失败，哪怕已有字节。
+    assert!(!read_acceptable(ReadPolicy::Complete, false, true));
+    assert!(!read_acceptable(ReadPolicy::Complete, false, false));
+    assert!(read_acceptable(ReadPolicy::Complete, true, false));
+    assert!(read_acceptable(ReadPolicy::Complete, true, true));
+    // AcceptPartial（probe）：已有字节时接受读错误（旧 `!read_ok && buf.is_empty()` 语义）。
+    assert!(read_acceptable(ReadPolicy::AcceptPartial, false, true));
+    assert!(!read_acceptable(ReadPolicy::AcceptPartial, false, false));
+    assert!(read_acceptable(ReadPolicy::AcceptPartial, true, false));
+    assert!(read_acceptable(ReadPolicy::AcceptPartial, true, true));
 }

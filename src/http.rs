@@ -59,6 +59,19 @@ pub fn is_auth_redirect(location_lower: &str) -> bool {
         .any(|k| location_lower.contains(k))
 }
 
+/// 读结束后的取舍：Complete 政策任何读错误都算失败；AcceptPartial 在已有字节时接受
+/// （探针只需要状态行 + Location；服务器/中间盒 RST 或超时不应丢弃已收到的应答）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReadPolicy {
+    Complete,
+    AcceptPartial,
+}
+
+/// `read_ok` = read_to_end 正常到 EOF；`got_bytes` = 缓冲区已有数据。
+pub fn read_acceptable(policy: ReadPolicy, read_ok: bool, got_bytes: bool) -> bool {
+    read_ok || (policy == ReadPolicy::AcceptPartial && got_bytes)
+}
+
 #[cfg(windows)]
 mod win {
     use std::io::{Read, Write};
@@ -68,7 +81,7 @@ mod win {
     use anyhow::{anyhow, Context, Result};
     use socket2::{Domain, Protocol, Socket, Type};
 
-    use super::{parse_status_code, parse_url};
+    use super::{parse_status_code, parse_url, read_acceptable, ReadPolicy};
 
     pub struct Request<'a> {
         pub url: &'a str,
@@ -76,6 +89,8 @@ mod win {
         pub user_agent: &'a str,
         pub timeout: Duration,
         pub max_bytes: u64,
+        /// 读错误的取舍（见 [`ReadPolicy`]）：probe 用 AcceptPartial，portal 用 Complete。
+        pub read_policy: ReadPolicy,
     }
 
     #[derive(Debug, Clone)]
@@ -86,6 +101,7 @@ mod win {
     }
 
     /// 同步 GET：socket2 绑源 IP、connect/read/write 用同一 timeout、读上限 max_bytes。
+    /// 读结束时按 `req.read_policy` 取舍：AcceptPartial 在已有字节时接受读错误。
     pub fn get(req: &Request<'_>) -> Result<Response> {
         let target = parse_url(req.url).ok_or_else(|| anyhow!("Unsupported URL (http only)"))?;
         let addr: SocketAddr = format!("{}:{}", target.host, target.port)
@@ -105,7 +121,11 @@ mod win {
         );
         stream.write_all(request.as_bytes())?;
         let mut buf = Vec::new();
-        stream.take(req.max_bytes).read_to_end(&mut buf)?;
+        if let Err(e) = stream.take(req.max_bytes).read_to_end(&mut buf) {
+            if !read_acceptable(req.read_policy, false, !buf.is_empty()) {
+                return Err(e).context("read response failed");
+            }
+        }
         let text = String::from_utf8_lossy(&buf);
         let status = parse_status_code(text.split("\r\n").next().unwrap_or_default())
             .ok_or_else(|| anyhow!("Malformed HTTP status line"))?;
@@ -138,6 +158,7 @@ mod win {
         user_agent: &'static str,
         timeout: Duration,
         max_bytes: u64,
+        read_policy: ReadPolicy,
     ) -> Result<Response> {
         tokio::task::spawn_blocking(move || {
             get(&Request {
@@ -146,6 +167,7 @@ mod win {
                 user_agent,
                 timeout,
                 max_bytes,
+                read_policy,
             })
         })
         .await

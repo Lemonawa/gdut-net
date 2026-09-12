@@ -102,11 +102,19 @@ mod win {
     const PORTAL_UA: &str = "python-requests/2.31.0";
 
     /// eportal 登录 GET：任何 HTTP/网络失败（含超时）→ None，调用方按认证失败处理。
+    /// Complete：旧 portal 语义——任何读错误（即使已有字节）都判失败。
     pub async fn portal_get(src_ip: Ipv4Addr, url: &str) -> Option<(u16, String)> {
-        crate::http::get_async(url.to_string(), src_ip, PORTAL_UA, TIMEOUT, MAX_RESPONSE)
-            .await
-            .ok()
-            .map(|r| (r.status, r.body))
+        crate::http::get_async(
+            url.to_string(),
+            src_ip,
+            PORTAL_UA,
+            TIMEOUT,
+            MAX_RESPONSE,
+            crate::http::ReadPolicy::Complete,
+        )
+        .await
+        .ok()
+        .map(|r| (r.status, r.body))
     }
 }
 
