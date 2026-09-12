@@ -42,10 +42,11 @@ mod win {
     use crate::ipc::server;
     use crate::probe;
     use crate::supervisor::{
-        Clock, Effect, Event, Lane, Supervisor, SystemClock, WatchdogStep, WirelessSample,
-        WlanSample,
+        Clock, Effect, Event, Lane, PortalAttempt, Supervisor, SystemClock, WatchdogStep,
+        WirelessSample, WlanSample,
     };
     use crate::watchdog::{DialError, Dialer, Prober, Watchdog, WatchdogCfg};
+    use crate::wireless::portal;
     use crate::wireless::routes::{self, RouteGuard};
     use crate::wireless::wlan;
     use crate::{crypto, notify, ras};
@@ -218,14 +219,26 @@ mod win {
     /// 无线接管执行体（ADR-0005）：串行执行 Supervisor 的无线车道效果。
     /// 决策正确性由 `Supervisor` 纯逻辑测试背书；本 worker 只做采信执行。
     struct WirelessWorker {
+        portal_url: String,
+        wlan_ac_ip: String,
+        user: String,
+        /// 明文密码只在本 worker 构建 portal URL；绝不进核心/Effect/Debug。
+        pass: String,
         portal_ip: Ipv4Addr,
         probe_ip: Ipv4Addr,
+        stop: CancellationToken,
+        ev_tx: mpsc::Sender<Event>,
         guard: RouteGuard,
     }
 
     impl WirelessWorker {
         /// 解析 portal/probe 目标；与 `Supervisor::new` 同一判定（配置可被手改）。
-        fn new(cfg: &Config) -> Result<Self> {
+        fn new(
+            cfg: &Config,
+            pass: String,
+            stop: CancellationToken,
+            ev_tx: mpsc::Sender<Event>,
+        ) -> Result<Self> {
             let portal_ip =
                 probe::parse_http_probe_target(&cfg.wireless.portal_url).map(|(ip, _)| ip);
             let probe_ip: Option<Ipv4Addr> = cfg.wireless.probe_host.parse().ok();
@@ -233,8 +246,14 @@ mod win {
                 bail!("Wireless: portal_url/probe_host invalid, manager disabled");
             };
             Ok(Self {
+                portal_url: cfg.wireless.portal_url.clone(),
+                wlan_ac_ip: cfg.wireless.wlan_ac_ip.clone(),
+                user: cfg.account.student_id.clone(),
+                pass,
                 portal_ip,
                 probe_ip,
+                stop,
+                ev_tx,
                 guard: RouteGuard::new(),
             })
         }
@@ -255,12 +274,51 @@ mod win {
             // 显式 Shutdown 后为空操作。
         }
 
+        /// 回灌结果事件。停止后不可阻塞（壳已不再消费结果，worker 必须
+        /// 回到 recv 取 `Shutdown`）。
+        async fn send(&self, event: Event) {
+            tokio::select! {
+                _ = self.ev_tx.send(event) => {}
+                _ = self.stop.cancelled() => {}
+            }
+        }
+
+        /// 长 await 与 stop 竞争：stop 先到返回 None（放弃结果，不再回灌）。
+        async fn raced<T>(&self, future: impl std::future::Future<Output = T>) -> Option<T> {
+            tokio::select! {
+                value = future => Some(value),
+                _ = self.stop.cancelled() => None,
+            }
+        }
+
         /// 执行一条无线效果。`race_stop=true` 时长 await 与 stop 竞争（取消即
         /// 放弃结果）；`false` = 停止握手效果，必须执行完（不可取消）。
-        async fn run_effect(&mut self, effect: Effect, _race_stop: bool) {
+        async fn run_effect(&mut self, effect: Effect, race_stop: bool) {
             match effect {
                 Effect::CleanupStaleRoutes => {
                     routes::cleanup_stale(&[self.portal_ip, self.probe_ip]);
+                }
+                Effect::Associate(profile) => {
+                    let task = tokio::task::spawn_blocking(move || wlan::associate(&profile));
+                    let joined = if race_stop {
+                        self.raced(task).await
+                    } else {
+                        Some(task.await)
+                    };
+                    if let Some(joined) = joined {
+                        let result = joined
+                            .map_err(|e| format!("associate task join failed: {e}"))
+                            .and_then(|r| r.map_err(|e| format!("{e:#}")));
+                        self.send(Event::AssociateFinished(result)).await;
+                    }
+                }
+                Effect::Disassociate => {
+                    let task = tokio::task::spawn_blocking(wlan::disassociate);
+                    if race_stop {
+                        let _ = self.raced(task).await;
+                    } else {
+                        let _ = task.await;
+                    }
                 }
                 Effect::EnsureRoutes {
                     dests,
@@ -272,14 +330,61 @@ mod win {
                 }
                 Effect::ReleaseMetric => self.guard.release_metric(),
                 Effect::TeardownRoutes => self.guard.teardown(),
-                Effect::Disassociate => {
-                    let _ = tokio::task::spawn_blocking(wlan::disassociate).await;
+                Effect::Settle(duration) => {
+                    let wait = sleep(duration);
+                    if race_stop {
+                        let _ = self.raced(wait).await;
+                    } else {
+                        wait.await;
+                    }
                 }
-                Effect::Associate(_)
-                | Effect::Settle(_)
-                | Effect::PortalAuth { .. }
-                | Effect::WlanProbe { .. } => {
-                    log::warn!("Wireless worker: effect pending implementation: {effect:?}");
+                Effect::PortalAuth { src_ip, timeout } => {
+                    let url = portal::build_login_url(
+                        &self.portal_url,
+                        &self.user,
+                        &self.pass,
+                        src_ip,
+                        &self.wlan_ac_ip,
+                    );
+                    // 日志只落脱敏 URL（内含明文密码）。
+                    log::info!(
+                        "Wireless: portal login from {} ({})",
+                        src_ip,
+                        portal::redact_query(&url)
+                    );
+                    let attempt = async {
+                        // 挂死会话兜底：portal_get 卡死不能把 Brain 永久钉在
+                        // Authing——超时按认证失败回报（T4 carry-forward）。
+                        match tokio::time::timeout(timeout, portal::portal_get(src_ip, &url)).await
+                        {
+                            Ok(Some((status, body))) => PortalAttempt::Replied { status, body },
+                            Ok(None) => PortalAttempt::NoReply,
+                            Err(_) => PortalAttempt::TimedOut,
+                        }
+                    };
+                    let attempt = if race_stop {
+                        self.raced(attempt).await
+                    } else {
+                        Some(attempt.await)
+                    };
+                    if let Some(attempt) = attempt {
+                        self.send(Event::PortalFinished(attempt)).await;
+                    }
+                }
+                Effect::WlanProbe {
+                    src_ip,
+                    gateway,
+                    url,
+                } => {
+                    let task = probe::probe_once(src_ip, gateway, &url);
+                    let verdict = if race_stop {
+                        self.raced(task).await
+                    } else {
+                        Some(task.await)
+                    };
+                    if let Some(verdict) = verdict {
+                        self.send(Event::WlanProbeFinished(verdict)).await;
+                    }
                 }
                 other => log::warn!("Wireless worker received non-wireless effect: {other:?}"),
             }
@@ -510,10 +615,10 @@ mod win {
 
         // 无线 lane worker（wireless.enabled 且 portal/probe 可解析时 spawn）。
         let (lane_tx, lane_rx) = mpsc::channel::<LaneMsg>(64);
-        let (_wl_tx, mut wl_rx) = mpsc::channel::<Event>(64);
+        let (wl_tx, mut wl_rx) = mpsc::channel::<Event>(64);
         let mut worker_handle = None;
         if cfg.wireless.enabled {
-            match WirelessWorker::new(&cfg) {
+            match WirelessWorker::new(&cfg, pass, stop.child_token(), wl_tx) {
                 Ok(worker) => worker_handle = Some(tokio::spawn(worker.run(lane_rx))),
                 Err(e) => log::error!("{e:#}"),
             }
