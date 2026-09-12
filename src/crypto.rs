@@ -58,10 +58,7 @@ mod win {
     };
 
     use super::{unwrap_blob, wrap_blob, ENTROPY_LEN, REG_SUBKEY, REG_VALUE};
-
-    fn wide(s: &str) -> Vec<u16> {
-        s.encode_utf16().chain(std::iter::once(0)).collect()
-    }
+    use crate::win32::wide;
 
     /// PW 指针借用缓冲； SAFETY 注释点约束调用方：指针仅在缓冲存活期间使用。
     fn pw(buf: &[u16]) -> PCWSTR {

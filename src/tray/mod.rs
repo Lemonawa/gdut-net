@@ -22,14 +22,14 @@ use tray_icon::menu::{CheckMenuItem, Menu, MenuEvent, MenuItem, PredefinedMenuIt
 use windows::core::PCWSTR;
 use windows::Win32::Foundation::{ERROR_SUCCESS, HANDLE};
 use windows::Win32::System::Registry::{
-    RegCloseKey, RegCreateKeyExW, RegSetValueExW, HKEY, HKEY_CURRENT_USER, KEY_WRITE,
-    REG_OPTION_NON_VOLATILE, REG_SZ,
+    RegCloseKey, RegDeleteValueW, RegOpenKeyExW, HKEY, HKEY_CURRENT_USER, KEY_SET_VALUE,
 };
 use windows::Win32::System::Threading::{CreateEventW, INFINITE};
 
 use crate::ipc::client::PipeClient;
 use crate::ipc::protocol::{Command, NetMode, StateSnapshot};
 use crate::status::Light;
+use crate::win32::{reg, wide};
 
 use gui::{GuiShared, GuiState};
 
@@ -43,11 +43,6 @@ pub(crate) type SharedSnapshot = Arc<Mutex<Option<StateSnapshot>>>;
 const SINGLETON_NAME: &str = "gdut-net-tray-singleton";
 /// 二次启动 → 主实例显示 GUI 的自动复位事件名。
 const SHOW_EVENT_NAME: &str = "gdut-net-tray-show";
-
-/// UTF-16 + NUL，Win32 W 接口参数。
-fn wide(s: &str) -> Vec<u16> {
-    s.encode_utf16().chain(std::iter::once(0)).collect()
-}
 
 /// 单实例判定结果。
 enum Singleton {
@@ -221,43 +216,9 @@ fn icon_for(icons: &[tray_icon::Icon], kind: IconKind) -> Option<&tray_icon::Ico
 /// 管理员权限，失败只记日志不阻断托盘启动（最坏情况回到不可见 toast）。
 fn register_aumid() {
     const SUBKEY: &str = r"Software\Classes\AppUserModelId\gdut-net";
-    let wide = |s: &str| {
-        s.encode_utf16()
-            .chain(std::iter::once(0))
-            .collect::<Vec<u16>>()
-    };
-    let subkey = wide(SUBKEY);
-    let display = wide("GDUT Net");
-
-    let mut hkey = HKEY::default();
-    let ret = unsafe {
-        RegCreateKeyExW(
-            HKEY_CURRENT_USER,
-            PCWSTR(subkey.as_ptr()),
-            None,
-            PCWSTR::null(),
-            REG_OPTION_NON_VOLATILE,
-            KEY_WRITE,
-            None,
-            &mut hkey,
-            None,
-        )
-    };
-    if ret != ERROR_SUCCESS {
-        log::warn!(
-            "Failed to register AUMID (toast may not show): error {}",
-            ret.0
-        );
-        return;
-    }
     // 默认值（值名为 null 的 REG_SZ）即通知中心显示的来源名。
-    // u16 按小端摊平成字节；"GDUT Net\0" 为 9 个 u16 = 18 字节，偶数
-    // 长度保证不截断码元。
-    let bytes: Vec<u8> = display.iter().flat_map(|w| w.to_le_bytes()).collect();
-    let ret = unsafe { RegSetValueExW(hkey, PCWSTR::null(), None, REG_SZ, Some(&bytes)) };
-    let closed = unsafe { RegCloseKey(hkey) };
-    if ret != ERROR_SUCCESS || closed != ERROR_SUCCESS {
-        log::warn!("Failed to write AUMID DisplayName: error {}", ret.0);
+    if let Err(e) = reg::set_string(HKEY_CURRENT_USER, SUBKEY, None, "GDUT Net") {
+        log::warn!("Failed to register AUMID (toast may not show): {e:#}");
     }
 }
 
@@ -265,54 +226,13 @@ fn register_aumid() {
 pub fn register_autostart(tray_exe: &std::path::Path) -> Result<()> {
     const RUN_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Run";
     let value = format!("\"{}\" tray", tray_exe.display());
-    let subkey_w: Vec<u16> = RUN_KEY.encode_utf16().chain(std::iter::once(0)).collect();
-    let name_w: Vec<u16> = "gdut-net-tray"
-        .encode_utf16()
-        .chain(std::iter::once(0))
-        .collect();
-    let value_w: Vec<u16> = value.encode_utf16().chain(std::iter::once(0)).collect();
-    let value_bytes: Vec<u8> = value_w.iter().flat_map(|c| c.to_le_bytes()).collect();
-    let mut hkey = HKEY::default();
-    let ret = unsafe {
-        RegCreateKeyExW(
-            HKEY_CURRENT_USER,
-            PCWSTR(subkey_w.as_ptr()),
-            None,
-            PCWSTR::null(),
-            REG_OPTION_NON_VOLATILE,
-            KEY_WRITE,
-            None,
-            &mut hkey,
-            None,
-        )
-    };
-    if ret != ERROR_SUCCESS {
-        anyhow::bail!("RegCreateKeyExW Run failed: {}", ret.0);
-    }
-    let ret = unsafe {
-        RegSetValueExW(
-            hkey,
-            PCWSTR(name_w.as_ptr()),
-            None,
-            REG_SZ,
-            Some(&value_bytes),
-        )
-    };
-    let _ = unsafe { RegCloseKey(hkey) };
-    if ret != ERROR_SUCCESS {
-        anyhow::bail!("RegSetValueExW failed: {}", ret.0);
-    }
-    Ok(())
+    reg::set_string(HKEY_CURRENT_USER, RUN_KEY, Some("gdut-net-tray"), &value)
 }
 
 pub fn unregister_autostart() -> Result<()> {
-    use windows::Win32::System::Registry::{RegDeleteValueW, RegOpenKeyExW, KEY_SET_VALUE};
     const RUN_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Run";
-    let subkey_w: Vec<u16> = RUN_KEY.encode_utf16().chain(std::iter::once(0)).collect();
-    let name_w: Vec<u16> = "gdut-net-tray"
-        .encode_utf16()
-        .chain(std::iter::once(0))
-        .collect();
+    let subkey_w = wide(RUN_KEY);
+    let name_w = wide("gdut-net-tray");
     let mut hkey = HKEY::default();
     let ret = unsafe {
         RegOpenKeyExW(

@@ -9,6 +9,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{bail, Context, Result};
 
 use crate::shell_shortcuts::SHORTCUTS;
+use crate::win32::{reg, wide};
 
 pub const START_MENU_FOLDER: &str = "GDUT Net";
 const UNINSTALL_SUBKEY: &str = r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\gdut-net";
@@ -90,10 +91,6 @@ pub fn installed_version() -> Option<String> {
 
 // ---- COM / registry 胶水 ----
 
-fn wide(s: &str) -> Vec<u16> {
-    s.encode_utf16().chain(std::iter::once(0)).collect()
-}
-
 /// 建单个 .lnk：CoInitializeEx/CoUninitialize 严格配对，body 失败也先反初始化再上抛。
 fn create_shortcut(
     lnk: &Path,
@@ -152,89 +149,52 @@ fn create_shortcut_body(
 
 /// 写 HKLM "应用和功能"卸载项（DisplayName/Version/Icon/UninstallString 等）。
 fn write_uninstall_key(install_dir: &Path, version: &str) -> Result<()> {
-    use windows::Win32::Foundation::ERROR_SUCCESS;
-    use windows::Win32::System::Registry::{
-        RegCloseKey, RegCreateKeyExW, RegSetValueExW, HKEY, HKEY_LOCAL_MACHINE, KEY_WRITE,
-        REG_DWORD, REG_OPTION_NON_VOLATILE, REG_SZ,
-    };
+    use windows::Win32::System::Registry::HKEY_LOCAL_MACHINE;
 
-    let mut hkey = HKEY::default();
-    let subkey = wide(UNINSTALL_SUBKEY);
-    let ret = unsafe {
-        RegCreateKeyExW(
-            HKEY_LOCAL_MACHINE,
-            windows::core::PCWSTR(subkey.as_ptr()),
-            None,
-            windows::core::PCWSTR::null(),
-            REG_OPTION_NON_VOLATILE,
-            KEY_WRITE,
-            None,
-            &mut hkey,
-            None,
-        )
-    };
-    if ret != ERROR_SUCCESS {
-        bail!("RegCreateKeyExW failed: {}", ret.0);
-    }
-    let set_sz = |name: &str, value: &str| -> Result<()> {
-        let n = wide(name);
-        let v = wide(value);
-        let bytes: Vec<u8> = v.iter().flat_map(|c| c.to_le_bytes()).collect();
-        let ret = unsafe {
-            RegSetValueExW(
-                hkey,
-                windows::core::PCWSTR(n.as_ptr()),
-                None,
-                REG_SZ,
-                Some(bytes.as_slice()),
-            )
-        };
-        if ret != ERROR_SUCCESS {
-            bail!("RegSetValueExW({name}) failed: {}", ret.0);
-        }
-        Ok(())
-    };
-    set_sz("DisplayName", "GDUT Net")?;
-    set_sz("DisplayVersion", version)?;
-    set_sz("InstallLocation", &install_dir.to_string_lossy())?;
-    set_sz(
-        "DisplayIcon",
+    reg::set_string(
+        HKEY_LOCAL_MACHINE,
+        UNINSTALL_SUBKEY,
+        Some("DisplayName"),
+        "GDUT Net",
+    )?;
+    reg::set_string(
+        HKEY_LOCAL_MACHINE,
+        UNINSTALL_SUBKEY,
+        Some("DisplayVersion"),
+        version,
+    )?;
+    reg::set_string(
+        HKEY_LOCAL_MACHINE,
+        UNINSTALL_SUBKEY,
+        Some("InstallLocation"),
+        &install_dir.to_string_lossy(),
+    )?;
+    reg::set_string(
+        HKEY_LOCAL_MACHINE,
+        UNINSTALL_SUBKEY,
+        Some("DisplayIcon"),
         &install_dir.join("gdut-net.exe").to_string_lossy(),
     )?;
-    set_sz(
-        "UninstallString",
+    reg::set_string(
+        HKEY_LOCAL_MACHINE,
+        UNINSTALL_SUBKEY,
+        Some("UninstallString"),
         &format!(
             "\"{}\" --uninstall",
             install_dir.join("gdut-net-setup.exe").display()
         ),
     )?;
-    set_sz(
-        "QuietUninstallString",
+    reg::set_string(
+        HKEY_LOCAL_MACHINE,
+        UNINSTALL_SUBKEY,
+        Some("QuietUninstallString"),
         &format!(
             "\"{}\" --silent --uninstall",
             install_dir.join("gdut-net-setup.exe").display()
         ),
     )?;
-    let one: u32 = 1;
     for name in ["NoModify", "NoRepair"] {
-        let n = wide(name);
-        let bytes = one.to_le_bytes();
-        let ret = unsafe {
-            RegSetValueExW(
-                hkey,
-                windows::core::PCWSTR(n.as_ptr()),
-                None,
-                REG_DWORD,
-                Some(bytes.as_slice()),
-            )
-        };
-        if ret != ERROR_SUCCESS {
-            bail!("RegSetValueExW({name}) failed: {}", ret.0);
-        }
-    }
-    let closed = unsafe { RegCloseKey(hkey) };
-    if closed != ERROR_SUCCESS {
-        bail!("RegCloseKey failed: {}", closed.0);
+        reg::set_dword(HKEY_LOCAL_MACHINE, UNINSTALL_SUBKEY, name, 1)?;
     }
     Ok(())
 }

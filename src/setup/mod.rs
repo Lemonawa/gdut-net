@@ -6,6 +6,8 @@ use std::path::PathBuf;
 use anyhow::{bail, Context, Result};
 use windows::Win32::UI::WindowsAndMessaging::{MB_ICONERROR, MB_ICONWARNING, MESSAGEBOX_STYLE};
 
+use crate::win32::wide;
+
 pub mod silent;
 pub mod ui;
 pub mod work;
@@ -162,10 +164,6 @@ fn elevate_self_and_maybe_wait(raw: &[String], wait: bool) -> Result<()> {
         }
     }
     Ok(())
-}
-
-fn wide(s: &str) -> Vec<u16> {
-    s.encode_utf16().chain(std::iter::once(0)).collect()
 }
 
 /// 参数带空格时加引号（安装路径可能含空格）。

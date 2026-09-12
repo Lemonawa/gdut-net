@@ -31,4 +31,5 @@ pub mod status;
 #[cfg(windows)]
 pub mod tray;
 pub mod watchdog;
+pub mod win32;
 pub mod wireless;

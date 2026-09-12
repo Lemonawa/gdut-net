@@ -17,13 +17,10 @@ mod win {
     };
 
     use super::EVENT_SOURCE_NAME;
+    use crate::win32::wide;
 
     pub const SOURCE_SUBKEY: &str =
         r"SYSTEM\CurrentControlSet\Services\EventLog\Application\gdut-net";
-
-    fn wide(s: &str) -> Vec<u16> {
-        s.encode_utf16().chain(std::iter::once(0)).collect()
-    }
 
     fn pw(buf: &[u16]) -> PCWSTR {
         PCWSTR(buf.as_ptr())
