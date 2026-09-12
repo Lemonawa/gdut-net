@@ -32,19 +32,12 @@ pub fn verdict_from_http(saw_redirect: bool, nexturl_is_auth: bool) -> ProbeVerd
 }
 
 /// 解析 HTTP 探测目标：仅接受 `http://` + IPv4 字面量（可带端口与路径），
-/// 返回 (IP, `host:port`)。config::validate 与 http_get_probe 共用本实现，
-/// 避免双实现漂移。纯函数，便于测试。
+/// 返回 (IP, `host:port`)。config::validate 用本实现做强校验；HTTP 客户端
+/// 走 `http::parse_url`，同一解析避免双实现漂移。纯函数，便于测试。
 pub fn parse_http_probe_target(url: &str) -> Option<(Ipv4Addr, String)> {
-    let rest = url.strip_prefix("http://")?;
-    let (host, _path) = match rest.find('/') {
-        Some(i) => (&rest[..i], &rest[i..]),
-        None => (rest, "/"),
-    };
-    let (ip, port) = match host.rsplit_once(':') {
-        Some((h, p)) => (h.parse::<Ipv4Addr>().ok()?, p.parse::<u16>().ok()?),
-        None => (host.parse::<Ipv4Addr>().ok()?, 80),
-    };
-    Some((ip, format!("{ip}:{port}")))
+    let t = crate::http::parse_url(url)?;
+    let ip = t.host.parse::<Ipv4Addr>().ok()?;
+    Some((ip, format!("{}:{}", t.host, t.port)))
 }
 
 /// 两级探测综合判定（ADR-0003）：ICMP 探链路、HTTP 探被踢，结果综合。
@@ -144,12 +137,10 @@ mod tests {
 
 #[cfg(windows)]
 mod win {
-    use std::io::{Read, Write};
     use std::mem::size_of;
-    use std::net::{Ipv4Addr, SocketAddr, TcpStream};
+    use std::net::Ipv4Addr;
     use std::time::Duration;
 
-    use socket2::{Domain, Protocol, Socket, Type};
     use tokio::task::spawn_blocking;
     use windows::Win32::Foundation::HANDLE;
     use windows::Win32::NetworkManagement::IpHelper::{
@@ -157,7 +148,7 @@ mod win {
     };
     use windows::Win32::System::IO::PIO_APC_ROUTINE;
 
-    use super::{combine, parse_http_probe_target, verdict_from_http, ProbeVerdict};
+    use super::{combine, verdict_from_http, ProbeVerdict};
 
     const ICMP_TIMEOUT_MS: u32 = 1500;
     const HTTP_TIMEOUT: Duration = Duration::from_secs(3);
@@ -168,78 +159,23 @@ mod win {
         u32::from(ip).swap_bytes()
     }
 
-    /// 宽容的状态行解析：`HTTP/1.0 302 Found`、`HTTP/1.1 200 OK`、`HTTP/2 200` 均可。
-    fn parse_status_code(status_line: &str) -> Option<u16> {
-        let mut parts = status_line.split_ascii_whitespace();
-        let version = parts.next()?;
-        if !version.starts_with("HTTP/") {
-            return None;
-        }
-        parts.next()?.parse().ok()
-    }
-
-    /// 判定 Location（已小写）是否为认证页跳转（wlanacip|nexturl|portal）。
-    fn is_auth_redirect(location_lower: &str) -> bool {
-        ["wlanacip", "nexturl", "portal"]
-            .iter()
-            .any(|k| location_lower.contains(k))
-    }
-
     /// HTTP GET 探测（HTTP/1.0，不跟随重定向），返回 (状态码, Location 小写)。
-    /// socket2 建套接字并绑物理适配器源 IP（std 1.97 TcpStream 无 bind）。
+    /// 薄包装 `crate::http::get`：socket/解析/超时等任何失败 → None + debug 日志。
     fn http_get_probe(src_ip: Ipv4Addr, http_url: &str) -> Option<(u16, String)> {
-        let rest = http_url.strip_prefix("http://")?;
-        let (host, path) = match rest.find('/') {
-            Some(i) => (&rest[..i], &rest[i..]),
-            None => (rest, "/"),
+        let req = crate::http::Request {
+            url: http_url,
+            bind_ip: src_ip,
+            user_agent: "gdut-net-probe",
+            timeout: HTTP_TIMEOUT,
+            max_bytes: HTTP_MAX_RESPONSE,
         };
-        let addr: SocketAddr = parse_http_probe_target(http_url)
-            .and_then(|(_, hostport)| hostport.parse().ok())
-            .or_else(|| {
-                log::debug!("Probe: failed to parse HTTP URL {http_url}");
-                None
-            })?;
-        let socket = match Socket::new(Domain::IPV4, Type::STREAM, Some(Protocol::TCP)) {
-            Ok(s) => s,
+        match crate::http::get(&req) {
+            Ok(r) => Some((r.status, r.location_lower)),
             Err(e) => {
-                log::debug!("Probe: socket creation failed: {e}");
-                return None;
+                log::debug!("Probe: HTTP request failed: {e:#}");
+                None
             }
-        };
-        if let Err(e) = socket.bind(&SocketAddr::from((src_ip, 0)).into()) {
-            log::debug!("Probe: failed to bind source IP {src_ip}: {e}");
-            return None;
         }
-        socket.set_read_timeout(Some(HTTP_TIMEOUT)).ok()?;
-        socket.set_write_timeout(Some(HTTP_TIMEOUT)).ok()?;
-        if let Err(e) = socket.connect_timeout(&addr.into(), HTTP_TIMEOUT) {
-            log::debug!("Probe: HTTP connect {addr} timeout/failed: {e}");
-            return None;
-        }
-        let mut stream = TcpStream::from(socket);
-        let req = format!(
-            "GET {path} HTTP/1.0\r\nHost: {host}\r\nUser-Agent: gdut-net-probe\r\nConnection: close\r\n\r\n"
-        );
-        stream.write_all(req.as_bytes()).ok()?;
-        let mut buf = Vec::new();
-        let read_ok = stream.take(HTTP_MAX_RESPONSE).read_to_end(&mut buf).is_ok();
-        if !read_ok && buf.is_empty() {
-            return None;
-        }
-        let text = String::from_utf8_lossy(&buf);
-        let code = parse_status_code(text.split("\r\n").next()?)?;
-        let location = text
-            .split("\r\n")
-            .skip(1)
-            .take_while(|l| !l.is_empty())
-            .find_map(|l| {
-                let (k, v) = l.split_once(':')?;
-                k.trim()
-                    .eq_ignore_ascii_case("location")
-                    .then(|| v.trim().to_ascii_lowercase())
-            })
-            .unwrap_or_default();
-        Some((code, location))
     }
 
     /// 网关 ICMP 探链路：绑源 IP 发 32 字节 echo，1500ms 内收到应答即链路通。
@@ -313,7 +249,7 @@ mod win {
             .await
             .unwrap_or(None)
             .map(|(status, location)| {
-                verdict_from_http(status == 302, is_auth_redirect(&location))
+                verdict_from_http(status == 302, crate::http::is_auth_redirect(&location))
             });
         let verdict = combine(icmp_ok, http);
         log::info!(
