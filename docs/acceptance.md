@@ -107,10 +107,12 @@ reg query "HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\gdut-net"
 > `.superpowers/sdd/2026-09-12-deepening-{mechanical,structural}/progress.md`。
 > 全部为评审 Minor 级、已逐条判定"可延后"；标 ⚠️ 的三条修复价值最高。
 
-### 优先处理
-- ⚠️ `service.rs::rollback_install` 固定用缺省 `CONFIG_PATH`：CLI `gdut-net install --config <自定义>` 失败时，回滚会把服务注册指回缺省配置路径（旧 CLI 本无回滚，属新能力缺口）。修法：把 `req.cfg_path` 穿透进回滚。
-- ⚠️ `supervisor.rs` 的 `ppp_ip` 只在 `WatchdogStep` 时采样（旧 runtime 每次推快照都重读 `ppp_adapter_ip()`）：无线模式下快照 IP 最多滞后一个探测周期（~30s）。修法：`Wake`/无线节拍顺带刷新，或并入 `SampleLink` 结果。
-- ⚠️ `wireless/routes.rs::set_standby_metric` 在"释放失败后再次压制"时会用当前值覆盖 `saved_metric`，可能丢失原始 metric（两波之前既有的缺陷）。修法：`saved_metric.is_some()` 时只重试 apply、不重存原值。
+### 已修复（2026-09-13，`fix/minors-cleanup`：6fc25b6 + d48b89d）
+- ✅ `rollback_install` 现按请求的配置路径回滚（CLI `install --config <自定义>` 不再指回缺省路径）。
+- ✅ 快照 `ppp_ip` 随每次链路采样（2s 一拍）刷新，不再滞后一个探测周期。
+- ✅ `RouteGuard::set_standby_metric` 仅在保存缺失或 ifindex 变化时读取原值；释放失败后的同接口重试不覆盖原值（含 WLAN 重连换 ifindex 的修正）。
+- ✅ 无效无线配置的 "manager disabled" 不再重复打两条（壳侧降为 debug）。
+- ✅ 核心 `SetMode` 中的死写 `cfg.wireless.mode` 已删除。
 
 ### 其余（清理 / 文档 / 测试）
 - `ipc/session.rs::send_and_confirm` 未在发送前校验 `max_frames >= 1`；帧预算耗尽时返回未命中谓词的帧（有文档、唯一调用方自检）。
@@ -123,10 +125,8 @@ reg query "HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\gdut-net"
 - `supervisor.rs` 重拨失败 toast 的拔线豁免比旧逻辑多一条 `eth_link == Some(false)`（更保守，接受）。
 - 首次链路采样为 `None` 后再拔线会打 `Ethernet link down at startup`（仅措辞，接受）。
 - `WatchdogStepped` 无 in-flight 护栏（Main 车道 FIFO 前提下不可达）。
-- `supervisor.rs` 中 `self.cfg.wireless.mode` 的写入无人读取（死写）。
 - Stop 握手前 `LaneMsg::Shutdown` 的发送无超时（队列 ≤3/64，理论项）。
-- 无线配置无效时核心与壳各打一条 "manager disabled"（重复日志）。
 - 从 cmd 通道关闭退出时缺 `Stop signal received` 日志（行为更干净，仅日志口径）。
-- `runtime.rs::Shell` 与 `supervisor.rs` 各持一份 `Config`（目前只同步 `wireless.mode`；扩展时注意）。
+- `runtime.rs::Shell` 与 `supervisor.rs` 各持一份 `Config`（核心只读构造时的副本、不再写回；壳负责持久化；扩展时注意）。
 - `tests/status.rs` 未钉：`wphase_zh(Authing/Error)`、`session_zh(Idle)`、`heartbeat_en(Running)`、`(ip, error)` 优先级。
 - 既有（两波之前）：debug 构建 `gdut-net` 会触发 clap debug-assert panic（`password_stdin` 的 `requires = "cmd"` 无对应参数），release 与测试不受影响。
