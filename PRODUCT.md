@@ -55,7 +55,7 @@ Binding constraints:
 
 ## Evidence on Hand
 
-- `README.md` (product, install, config, CLI docs), `docs/acceptance.md` (on-device checklist), `docs/adr/0001`–`0007` (decision records), `CONTEXT.md` (domain vocabulary + field-tested rules), `docs/superpowers/{plans,specs}` (design history).
+- `README.md` (product, install, config, CLI docs), `docs/acceptance.md` (on-device checklist), `docs/adr/0001`–`0008` (decision records), `CONTEXT.md` (domain vocabulary + field-tested rules), `docs/superpowers/{plans,specs}` (design history).
 - CI (`.github/workflows/ci.yml`, `release.yml`) and GitHub releases; from v0.4.0 the release asset is a single `gdut-net-setup.exe` (main exe + payload appended).
 - Absent (do not fabricate): product screenshots or marketing imagery, logo / brand asset files (the tray icon is generated in code), testimonials, benchmarks, telemetry, third-party user data.
 

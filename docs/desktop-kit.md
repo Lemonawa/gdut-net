@@ -70,3 +70,8 @@
 3. **不要给 Mihomo 设 `interface-name`**（2026-09-10 实证）：无线接管期间该接口不存在，mihomo 每个出站都硬错 `interface not found`，无回退 → Clash 全 timeout。mihomo 的 auto-detect 按"非虚拟 up 接口中总 metric 最低者"选路，本机有线自动选 `gdut`(PPP)、无线自动选 `WLAN`，四组合（有/无线 × TUN 开/关）均实测正确。TUN MTU≤1400。
 4. Verge 配置注入点是 `profiles/Merge.yaml`，别手改生成的 `clash-verge.yaml`；改完必须**完整退出并重启 Verge 进程**才重新合并。
 5. WSL 是 mirror 模式跟主机路由；直连走 TUN 即可（fake-ip 已退役为 redir-host）。
+
+## 校园网反制（2026-09-16 实测）
+
+- **不要开 Windows 移动热点**（ICS：`icssvc` + `SharedAccess`）共享 `gdut`：AP 正常起（`StartTetheringAsync` Success、`192.168.137.1`、Wi-Fi Direct 适配器 `本地连接* 9/10`），但校园侧 13s 内首次踢掉 PPPoE 会话，此后每 ~35s 一踢（重拨成功也再踢），**没有客户端连上也照踢**；关掉热点 30s 内会话恢复稳定（服务日志三次 `Probe … LinkDown` → 重拨循环）。疑似未授权 AP 检测。
+- **物理以太网显示"无法访问 Internet"是双出口的正常判定**：NCSI 的"到 Internet 下一跳"是全系统选举，PPP（有效 metric 26）一上线就夺走它；伪探测只能换来 1–7 秒假 Internet。详见 ADR-0008 与 `CONTEXT.md` 实测陷阱。

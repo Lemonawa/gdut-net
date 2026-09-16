@@ -160,5 +160,11 @@ setup 文件尾部追加 `[files][TOC][footer]` 的自定义容器：footer 24B�
 - **拨 TUN 开关必重启 opencode/长连接进程**（TCP 无迁移，SSE 静默死亡）；判新老连接用 `curl ai.lma.moe/v1/models`（401 = 新连接活）。
 - Tailscale 家↔校不能直连（校园 CGNAT = 对称 NAT + 端口重写 + 多 ISP 池；家路由器按远端过滤）；修复在家侧：开 UPnP 或转发 UDP 41641→192.168.5.11；全案 `docs/tailscale-p2p.md`。
 
+### NCSI 网络徽标与热点反制（2026-09-16 实测）
+- 物理以太网永远显示"无法访问 Internet"（`Get-NetConnectionProfile` → `LocalNetwork`）是双出口拓扑的**真实判定**，不是故障：校园有线 L3 需 PPPoE，物理口直连只有内网。Win11 的 NCSI 由 `netprofm`（Network List Service）承载；"到 Internet 的下一跳"是**全系统选举**，PPP 会话（有效 metric 26）一上线就夺走它。
+- `NlaSvc\Parameters\Internet` 的 `ActiveWebProbeHost` 指到本机 + 本机 80 应答 `Microsoft Connect Test`，以太网确能拿到 `ActiveHttpProbeSucceeded`，但 **1–7 秒内必被 `NoRoute` 降回 LocalNetwork**；此后探测持续成功（20s 一次 ×5）也无法恢复。故不伪造徽标（ADR-0008）。NCSI 探测报文特征：`GET /connecttest.txt HTTP/1.1`、`User-Agent: Microsoft NCSI`、`Cache-Control: no-cache`、`Pragma: no-cache`。
+- `Microsoft-Windows-NCSI/Analytic` 默认关闭，调试开 `wevtutil sl Microsoft-Windows-NCSI/Analytic /e:true`（交互确认喂 `y`），事后 `/e:false`。
+- **不要开 Windows 移动热点（ICS）共享 `gdut`**：AP 正常起（`StartTetheringAsync` Success、`192.168.137.1`、Wi-Fi Direct 适配器 `本地连接* 9/10`），但校园侧 13s 内首次踢线，之后每 ~35s 一踢（重拨即再踢），**没有客户端连上也照踢**；关热点 30s 内恢复稳定（2026-09-16 服务日志三次 `Probe … LinkDown` → 重拨循环）。疑似未授权 AP 检测。
+
 ### 给用户的断网窗口操作
 - 必须自带回滚块（能独立执行；网络炸了用户侧无 AI 可达）。

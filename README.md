@@ -168,7 +168,7 @@ cargo build --release
 
 CI (`.github/workflows/ci.yml`): `linux-test` (test + clippy + fmt), `windows-build` (test + clippy + release build + packed `gdut-net-setup.exe` artifact), triggered on push to main and all PRs. Pushing a tag `v*` runs [.github/workflows/release.yml](.github/workflows/release.yml), which builds and attaches `gdut-net-setup.exe` to a GitHub Release automatically.
 
-Architecture and domain vocabulary: [CONTEXT.md](CONTEXT.md); design decisions: [docs/adr/](docs/adr/) (service/tray split ADR-0001, heartbeat variant ADR-0002, two-stage drop detection ADR-0003, tray icon ADR-0004, wireless mode switch ADR-0005, egui panel ADR-0006, installer + daily GUI ADR-0007). Installed desktop operations (Start Menu entries, personal ops scripts, rollback chain): [docs/desktop-kit.md](docs/desktop-kit.md).
+Architecture and domain vocabulary: [CONTEXT.md](CONTEXT.md); design decisions: [docs/adr/](docs/adr/) (service/tray split ADR-0001, heartbeat variant ADR-0002, two-stage drop detection ADR-0003, tray icon ADR-0004, wireless mode switch ADR-0005, egui panel ADR-0006, installer + daily GUI ADR-0007, no NCSI badge forgery ADR-0008). Installed desktop operations (Start Menu entries, personal ops scripts, rollback chain): [docs/desktop-kit.md](docs/desktop-kit.md).
 
 ## License
 
