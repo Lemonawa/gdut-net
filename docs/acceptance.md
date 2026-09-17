@@ -39,6 +39,12 @@ reg query "HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\gdut-net"
 
 `log.event_log = true` 时：事件查看器 → Windows 日志 → 应用程序，来源 `gdut-net`，warn/error 应同步出现（如"认证失败(691)"）。
 
+## 2026-09-17 架构加固（待真机复验）
+
+- [x] Linux 全套 `cargo test`（含 Wireless Egress 5 项接口测试、Supervisor 26 项编排测试）。
+- [x] Linux / Windows cross-target `clippy -D warnings` 与 `fmt` 通过。
+- [ ] 安装新版后重复无线接管条目 6–10，确认 eportal /32、metric 恢复、拔线不拨号和让位行为不变。
+
 ## 托盘与状态（用户会话）
 
 ```powershell
