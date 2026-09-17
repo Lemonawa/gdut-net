@@ -8,7 +8,7 @@ use anyhow::{bail, Context, Result};
 
 use crate::adapter;
 use crate::config::Config;
-use crate::wireless::{portal, routes, wlan};
+use crate::wireless::{egress, portal, routes, wlan};
 
 const WAIT_IP: Duration = Duration::from_secs(20);
 
@@ -42,21 +42,23 @@ pub fn cli_test(cfg_path: &Path) -> Result<()> {
         adapter.ipv4, gw, adapter.ifindex
     );
 
-    // 自包含 /32：结束即删（含失败路径——scope guard 手法）
-    struct Teardown(routes::RouteGuard);
+    // 自包含 Wireless Egress：结束即释放（含失败路径）。
+    let mut wireless_egress = egress::WirelessEgress::new(routes::RouteGuard::new());
+    wireless_egress.own_destinations(&[portal_ip]);
+    let settle = wireless_egress.acquire(egress::WlanEndpoint {
+        gateway: gw,
+        ifindex: adapter.ifindex,
+    });
+    struct Teardown(egress::WirelessEgress<routes::RouteGuard>);
     impl Drop for Teardown {
         fn drop(&mut self) {
-            self.0.teardown();
+            self.0.release();
             let _ = wlan::disassociate();
         }
     }
-    let mut guard = routes::RouteGuard::new();
-    guard.ensure(&[portal_ip], gw, adapter.ifindex);
-    let _teardown = Teardown(guard);
-    // 路由写入到数据面生效有数秒窗口（2026-09-10 真机：首 SYN 超时，~2-8s
-    // 后恢复）。等一拍再发首个请求，与 runtime manager 同源。
-    println!("Waiting 3s for route propagation ...");
-    std::thread::sleep(Duration::from_secs(3));
+    let _teardown = Teardown(wireless_egress);
+    println!("Waiting {}ms for route propagation ...", settle.as_millis());
+    std::thread::sleep(settle);
 
     let url = portal::build_login_url(
         &cfg.wireless.portal_url,

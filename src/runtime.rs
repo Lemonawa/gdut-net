@@ -46,6 +46,7 @@ mod win {
         WirelessSample, WlanSample,
     };
     use crate::watchdog::{DialError, Dialer, Prober, Watchdog, WatchdogCfg};
+    use crate::wireless::egress::{WirelessEgress, WlanEndpoint};
     use crate::wireless::portal;
     use crate::wireless::routes::{self, RouteGuard};
     use crate::wireless::wlan;
@@ -228,7 +229,7 @@ mod win {
         probe_ip: Ipv4Addr,
         stop: CancellationToken,
         ev_tx: mpsc::Sender<Event>,
-        guard: RouteGuard,
+        egress: WirelessEgress<RouteGuard>,
     }
 
     impl WirelessWorker {
@@ -254,7 +255,7 @@ mod win {
                 probe_ip,
                 stop,
                 ev_tx,
-                guard: RouteGuard::new(),
+                egress: WirelessEgress::new(RouteGuard::new()),
             })
         }
 
@@ -320,16 +321,18 @@ mod win {
                         let _ = task.await;
                     }
                 }
-                Effect::EnsureRoutes {
-                    dests,
-                    gateway,
-                    ifindex,
-                } => self.guard.ensure(&dests, gateway, ifindex),
-                Effect::SuppressMetric { ifindex, target } => {
-                    self.guard.set_standby_metric(ifindex, target);
+                Effect::AcquireWirelessEgress(endpoint) => {
+                    let _ = self.egress.acquire(endpoint);
                 }
-                Effect::ReleaseMetric => self.guard.release_metric(),
-                Effect::TeardownRoutes => self.guard.teardown(),
+                Effect::SuppressMetric { ifindex, target } => {
+                    let endpoint = WlanEndpoint {
+                        gateway: Ipv4Addr::UNSPECIFIED,
+                        ifindex,
+                    };
+                    self.egress.suppress_metric(endpoint, target);
+                }
+                Effect::ReleaseMetric => self.egress.release_metric(),
+                Effect::TeardownRoutes => self.egress.release(),
                 Effect::Settle(duration) => {
                     let wait = sleep(duration);
                     if race_stop {
@@ -626,7 +629,12 @@ mod win {
         let mut worker_handle = None;
         if cfg.wireless.enabled {
             match WirelessWorker::new(&cfg, pass, stop.child_token(), wl_tx) {
-                Ok(worker) => worker_handle = Some(tokio::spawn(worker.run(lane_rx))),
+                Ok(mut worker) => {
+                    worker
+                        .egress
+                        .own_destinations(&[worker.portal_ip, worker.probe_ip]);
+                    worker_handle = Some(tokio::spawn(worker.run(lane_rx)));
+                }
                 // 核心（Supervisor::new）已对同一失败打 error，这里不重复。
                 Err(e) => log::debug!("{e:#}"),
             }

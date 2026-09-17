@@ -20,6 +20,7 @@ use gdut_net::supervisor::{
     WirelessSample, WlanSample,
 };
 use gdut_net::watchdog::{DialError, Dialer, Prober, SessionView, Watchdog, WatchdogCfg};
+use gdut_net::wireless::egress::WlanEndpoint;
 
 // ---------------------------------------------------------------------------
 // FakeClock
@@ -981,11 +982,10 @@ fn every_effect_has_exactly_one_lane() {
         Effect::CleanupStaleRoutes,
         Effect::Associate("p".into()),
         Effect::Disassociate,
-        Effect::EnsureRoutes {
-            dests: vec![Ipv4Addr::new(10, 0, 3, 2)],
+        Effect::AcquireWirelessEgress(WlanEndpoint {
             gateway: Ipv4Addr::new(10, 1, 1, 1),
             ifindex: 15,
-        },
+        }),
         Effect::SuppressMetric {
             ifindex: 15,
             target: 100,
@@ -1031,7 +1031,7 @@ async fn verdict_cleared_after_auth_then_probe_now() {
         matches!(
             effects.as_slice(),
             [
-                Effect::EnsureRoutes { .. },
+                Effect::AcquireWirelessEgress(_),
                 Effect::Settle(_),
                 Effect::PortalAuth { .. }
             ]
@@ -1063,7 +1063,7 @@ async fn verdict_cleared_after_auth_then_probe_now() {
         matches!(
             effects.as_slice(),
             [
-                Effect::EnsureRoutes { .. },
+                Effect::AcquireWirelessEgress(_),
                 Effect::Settle(_),
                 Effect::PortalAuth { .. }
             ]
@@ -1110,22 +1110,22 @@ async fn ensure_routes_only_on_portal_auth() {
     assert!(
         !first
             .iter()
-            .any(|e| matches!(e, Effect::EnsureRoutes { .. })),
-        "Associate must not ensure routes: {first:?}"
+            .any(|e| matches!(e, Effect::AcquireWirelessEgress(_))),
+        "Associate must not acquire Wireless Egress: {first:?}"
     );
     h.advance_to_wake().await;
     h.take_wireless();
     h.push(Event::AssociateFinished(Ok(()))).await;
 
-    // wlan IP 有、网关缺失：不产生 EnsureRoutes/Settle/PortalAuth（on_auth(false) 回报）。
+    // wlan IP 有、网关缺失：不产生 Egress/Settle/PortalAuth（on_auth(false) 回报）。
     h.world.wireless = wlan_sample("10.1.1.5", None, 15);
     h.run_until(2_000).await;
     assert!(
         h.take_wireless().is_empty(),
-        "PortalAuth without gateway must not ensure routes"
+        "PortalAuth without gateway must not acquire Wireless Egress"
     );
 
-    // Error 退避后重新关联，再以齐备网关认证：EnsureRoutes + Settle + PortalAuth。
+    // Error 退避后重新关联，再以齐备网关认证：Egress + Settle + PortalAuth。
     h.run_until(8_000).await;
     assert!(without_metric(h.take_wireless())
         .iter()
@@ -1136,11 +1136,10 @@ async fn ensure_routes_only_on_portal_auth() {
     assert_eq!(
         without_metric(h.take_wireless()),
         vec![
-            Effect::EnsureRoutes {
-                dests: vec![Ipv4Addr::new(10, 0, 3, 2), Ipv4Addr::new(223, 5, 5, 5)],
+            Effect::AcquireWirelessEgress(WlanEndpoint {
                 gateway: Ipv4Addr::new(10, 1, 1, 1),
                 ifindex: 15,
-            },
+            }),
             Effect::Settle(Duration::from_secs(3)),
             Effect::PortalAuth {
                 src_ip: Ipv4Addr::new(10, 1, 1, 5),

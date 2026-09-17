@@ -22,6 +22,9 @@ use crate::ipc::protocol::{
 };
 use crate::probe::ProbeVerdict;
 use crate::watchdog::SessionView;
+
+mod notification;
+use crate::wireless::egress::{WlanEndpoint, ROUTE_SETTLE};
 use crate::wireless::{portal, Action, Brain, World, JOIN_TIMEOUT_SECS};
 
 /// 链路轮询间隔（既有 2s 节拍；拔线期间同样 2s，插线检测 ≤2s）。
@@ -32,10 +35,6 @@ const WIRELESS_TICK_MS: u64 = 2_000;
 const SAMPLE_RETRY_MS: u64 = 2_000;
 /// eportal 单次认证墙钟上限（真机：绑源 SYN 偶发被丢 + SYN 重传，20s 兜底）。
 const PORTAL_AUTH_TIMEOUT: Duration = Duration::from_secs(20);
-/// /32 路由写入后的数据面生效等待（真机实测 2–8s 竞态窗口）。
-const ROUTE_SETTLE: Duration = Duration::from_secs(3);
-/// 同一原因 Toast 的最小间隔。
-const NOTIFY_THROTTLE_MS: u64 = 30 * 60 * 1000;
 /// 连续重拨失败累计多久后弹 Toast。
 const REDIAL_FAILING_TOAST_AFTER_MS: u64 = 10 * 60 * 1000;
 
@@ -167,11 +166,8 @@ pub enum Effect {
     CleanupStaleRoutes,
     Associate(String),
     Disassociate,
-    EnsureRoutes {
-        dests: Vec<Ipv4Addr>,
-        gateway: Ipv4Addr,
-        ifindex: u32,
-    },
+    /// Wireless Egress：获取 /32 出口并返回生效等待。
+    AcquireWirelessEgress(WlanEndpoint),
     SuppressMetric {
         ifindex: u32,
         target: u32,
@@ -214,7 +210,7 @@ impl Effect {
             Effect::CleanupStaleRoutes
             | Effect::Associate(_)
             | Effect::Disassociate
-            | Effect::EnsureRoutes { .. }
+            | Effect::AcquireWirelessEgress(_)
             | Effect::SuppressMetric { .. }
             | Effect::ReleaseMetric
             | Effect::TeardownRoutes
@@ -264,8 +260,7 @@ pub struct Supervisor {
     heartbeat: HeartbeatStatus,
     failing_since_ms: Option<u64>,
     // 通知节流
-    notify_in_flight: Vec<ToastKey>,
-    notify_delivered_at: Vec<(ToastKey, u64)>,
+    notifications: notification::NotificationLedger,
     // 无线接管
     brain: Option<Brain>,
     wireless_died: bool,
@@ -309,8 +304,7 @@ impl Supervisor {
             ppp_ip: None,
             heartbeat: HeartbeatStatus::Off,
             failing_since_ms: None,
-            notify_in_flight: Vec::new(),
-            notify_delivered_at: Vec::new(),
+            notifications: notification::NotificationLedger::default(),
             brain: None,
             wireless_died: false,
             wireless_stopped_reported: false,
@@ -386,7 +380,7 @@ impl Supervisor {
                 Event::WlanProbeFinished(verdict) => self.handle_probe_finished(verdict, wall),
                 Event::Heartbeat(status) => self.handle_heartbeat(status, now, &mut effects),
                 Event::NotifyResult { key, delivered } => {
-                    self.handle_notify_result(key, delivered, now)
+                    self.notifications.on_result(key, delivered, now)
                 }
                 Event::WirelessDied => self.handle_wireless_died(wall),
                 Event::Stop => self.handle_stop(wall, &mut effects),
@@ -579,7 +573,7 @@ impl Supervisor {
                         now.saturating_sub(since) / 60_000,
                         self.session.redial_attempts
                     );
-                    self.maybe_notify(
+                    self.notifications.maybe_notify(
                         ToastKey::RedialFailing,
                         "gdut-net network error",
                         body,
@@ -697,15 +691,14 @@ impl Supervisor {
                     self.verdict = None;
                     return false;
                 };
-                let (Some(portal_ip), Some(probe_ip)) = (self.portal_ip, self.probe_ip) else {
+                // I6：Wireless Egress 获取只在 wlan IP+网关齐备时、认证等待之前。
+                if self.portal_ip.is_none() || self.probe_ip.is_none() {
                     return true;
-                };
-                // I6：EnsureRoutes 只在 PortalAuth 且 wlan IP+网关齐备时、Settle 之前。
-                effects.push(Effect::EnsureRoutes {
-                    dests: vec![portal_ip, probe_ip],
+                }
+                effects.push(Effect::AcquireWirelessEgress(WlanEndpoint {
                     gateway,
                     ifindex: wlan.ifindex,
-                });
+                }));
                 effects.push(Effect::Settle(ROUTE_SETTLE));
                 effects.push(Effect::PortalAuth {
                     src_ip: wlan.ipv4,
@@ -802,7 +795,7 @@ impl Supervisor {
 
     fn handle_heartbeat(&mut self, status: HeartbeatStatus, now: u64, effects: &mut Vec<Effect>) {
         if let HeartbeatStatus::Error(e) = &status {
-            self.maybe_notify(
+            self.notifications.maybe_notify(
                 ToastKey::HeartbeatError,
                 "gdut-net heartbeat error",
                 format!("Compatibility heartbeat error: {e}"),
@@ -811,44 +804,6 @@ impl Supervisor {
             );
         }
         self.heartbeat = status;
-    }
-
-    fn handle_notify_result(&mut self, key: ToastKey, delivered: bool, now: u64) {
-        let Some(pos) = self.notify_in_flight.iter().position(|k| *k == key) else {
-            return; // 迟到的投递结果：no-op
-        };
-        self.notify_in_flight.remove(pos);
-        if delivered {
-            // 窗口只在成功投递后开启（失败不占用节流窗口）。
-            self.notify_delivered_at.retain(|(k, _)| *k != key);
-            self.notify_delivered_at.push((key, now));
-        }
-    }
-
-    /// 通知节流：per-key 30 分钟窗口；在飞不重发；窗口只在投递成功后开启（I8）。
-    fn maybe_notify(
-        &mut self,
-        key: ToastKey,
-        title: &str,
-        body: String,
-        now: u64,
-        effects: &mut Vec<Effect>,
-    ) {
-        if self.notify_in_flight.contains(&key) {
-            return;
-        }
-        if let Some(&(_, at)) = self.notify_delivered_at.iter().find(|(k, _)| *k == key) {
-            if now.saturating_sub(at) < NOTIFY_THROTTLE_MS {
-                return;
-            }
-        }
-        log::info!("Toast [{}]: {title} — {body}", key.as_str());
-        self.notify_in_flight.push(key);
-        effects.push(Effect::Notify {
-            key,
-            title: title.to_string(),
-            body,
-        });
     }
 
     fn handle_wireless_died(&mut self, wall: u64) {

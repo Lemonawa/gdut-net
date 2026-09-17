@@ -5,9 +5,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context, Result};
 
-use crate::service::{
-    self, capture_prev_service, install_with_rollback, rollback_install, Credential, InstallRequest,
-};
+use crate::service;
 use crate::setup::{config_path, install_dir, SetupArgs};
 
 /// 失败回滚实情由 `service` 定义；UI 继续以 `work::RollbackOutcome` 引用。
@@ -122,7 +120,7 @@ fn step_finished(tx: &Sender<Ev>, key: &'static str, label: &str, outcome: StepO
 }
 
 /// 从 exe 尾读 payload；未打包时回退到 exe 旁 payload/ 目录（开发态）。
-fn load_payload() -> Result<Vec<crate::payload::Entry>> {
+pub(crate) fn load_payload() -> Result<Vec<crate::payload::Entry>> {
     let exe = std::env::current_exe()?;
     let bytes = std::fs::read(&exe)?;
     match crate::payload::unpack(&bytes)? {
@@ -162,107 +160,16 @@ pub fn spawn_install(
 }
 
 fn run_install(tx: Sender<Ev>, args: SetupArgs, student_id: String, password: Option<String>) {
-    // args 供调用方标记模式；凭据由 password 的 Option 显式表达（None = KeepExisting）。
-    let _ = args;
-
-    // 先记下安装前的服务状态（在解包覆盖之前）——回滚只能依据它。
-    let prev = capture_prev_service();
-    // install 核心失败时回滚已在 install_with_rollback 内完成；记下实情，
-    // 收尾不再重复回滚。解包/快捷方式/起服务等后续失败才由收尾回滚。
-    let mut core_rollback: Option<RollbackOutcome> = None;
-
-    let result: Result<()> = (|| {
-        step(&tx, STEP_STOP_SERVICE, "停止旧服务");
-        service::stop_service(Duration::from_secs(16))?;
-        kill_tray();
-        step_done(&tx, STEP_STOP_SERVICE, "停止旧服务");
-
-        step(&tx, STEP_UNPACK, "解包文件");
-        let dir = install_dir();
-        std::fs::create_dir_all(&dir)
-            .with_context(|| format!("Failed to create {}", dir.display()))?;
-        for entry in load_payload()? {
-            let dest = dir.join(&entry.name);
-            std::fs::write(&dest, &entry.data)
-                .with_context(|| format!("Failed to write {}", dest.display()))?;
-        }
-        let self_exe = std::env::current_exe()?;
-        let setup_dest = crate::paths::setup_exe();
-        // 从安装目录内运行（修复场景）：正在运行的文件不能覆盖，跳过自我拷贝。
-        let same_file = match (
-            std::fs::canonicalize(&self_exe),
-            std::fs::canonicalize(&setup_dest),
-        ) {
-            (Ok(a), Ok(b)) => a == b,
-            _ => false,
-        };
-        if !same_file {
-            std::fs::copy(&self_exe, &setup_dest)
-                .context("Failed to copy setup exe into install dir")?;
-        }
-        step_done(&tx, STEP_UNPACK, "解包文件");
-
-        step(&tx, STEP_INSTALL_CORE, "写入配置并注册服务");
-        let credential = match password {
-            Some(p) => Credential::Plain(p),
-            None => Credential::KeepExisting,
-        };
-        if let Err(f) = install_with_rollback(
-            InstallRequest {
-                cfg_path: config_path(),
-                student_id: Some(student_id),
-                credential,
-                service_exe: crate::paths::install_exe(),
-                tray_exe: crate::paths::install_exe(),
-            },
-            &prev,
-        ) {
-            core_rollback = Some(f.rollback);
-            return Err(f.error);
-        }
-        step_done(&tx, STEP_INSTALL_CORE, "写入配置并注册服务");
-
-        step(&tx, STEP_SHELL_INTEGRATION, "创建开始菜单快捷方式");
-        crate::shell::install_shell_integration(&dir, env!("CARGO_PKG_VERSION"))?;
-        step_done(&tx, STEP_SHELL_INTEGRATION, "创建开始菜单快捷方式");
-
-        step(&tx, STEP_START_SERVICE, "启动服务");
-        service::start_service()?;
-        step_done(&tx, STEP_START_SERVICE, "启动服务");
-        Ok(())
-    })();
-
-    match result {
-        Ok(()) => emit(
-            &tx,
-            Ev::Done {
-                result: Ok(()),
-                rollback: RollbackOutcome::NotNeeded,
-            },
-        ),
-        Err(e) => {
-            let rollback = match core_rollback {
-                // 核心失败的日志与回滚都在 install_with_rollback 内完成。
-                Some(rb) => rb,
-                None => {
-                    // 后续步骤失败：此刻才回滚（日志文案与旧实现一致）。
-                    log::error!("Install failed (rolling back): {e:#}");
-                    rollback_install(&prev, &config_path())
-                }
-            };
-            emit(
-                &tx,
-                Ev::Done {
-                    result: Err(format!("{e:#}")),
-                    rollback,
-                },
-            );
-        }
-    }
+    super::transaction::run_install(
+        &args,
+        super::transaction::InstallRequest {
+            student_id,
+            password,
+        },
+        tx,
+    );
 }
 
-/// 卸载：停服务/托盘 → uninstall_core（报告逐行翻译）→ 安排删除安装目录。
-/// 卸载没有回滚概念：任何失败只记录并上报（幂等，可原样重试）。
 pub fn spawn_uninstall(tx: Sender<Ev>, purge: bool, remove_dir: bool) {
     std::thread::Builder::new()
         .name("gdut-net-setup-uninstall".into())

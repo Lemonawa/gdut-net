@@ -4,6 +4,8 @@
 use std::net::Ipv4Addr;
 
 use anyhow::{anyhow, Result};
+
+use crate::wireless::egress::EgressOps;
 use windows::Win32::Foundation::{ERROR_NOT_FOUND, ERROR_SUCCESS};
 use windows::Win32::NetworkManagement::IpHelper::{
     CreateIpForwardEntry2, DeleteIpForwardEntry2, GetIpForwardTable2, GetIpInterfaceEntry,
@@ -219,6 +221,28 @@ impl RouteGuard {
 impl Drop for RouteGuard {
     fn drop(&mut self) {
         self.teardown();
+    }
+}
+
+impl EgressOps for RouteGuard {
+    fn add_route(&mut self, dest: Ipv4Addr, gateway: Ipv4Addr, ifindex: u32) {
+        if add(dest, gateway, ifindex).is_err() {
+            log::warn!("Wireless Egress add {dest} failed (kept going)");
+        }
+    }
+
+    fn delete_route(&mut self, dest: Ipv4Addr, gateway: Ipv4Addr, ifindex: u32) {
+        if del(dest, gateway, ifindex).is_err() {
+            log::warn!("Wireless Egress delete {dest} failed (kept going)");
+        }
+    }
+
+    fn suppress_metric(&mut self, ifindex: u32, target: u32) {
+        self.set_standby_metric(ifindex, target);
+    }
+
+    fn restore_metric(&mut self, _ifindex: u32) {
+        self.release_metric();
     }
 }
 

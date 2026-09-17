@@ -56,6 +56,10 @@ _Avoid_: 注销（logout 接口已知不可用，不用）
 **接管去抖 (Takeover Debounce)**:
 以太网 link down 或有线会话失联持续 `takeover_after_secs` 才启动接管，防抖动误切。
 
+**无线出口 (Wireless Egress)**:
+无线接管期间受管理的 WLAN 出口：通往 eportal 与无线探针目标的 /32 主机路由、接口 metric 压制/还原，以及获取、等待生效与释放的完整生命周期。
+_Avoid_: 路由模块（只指其中一部分）
+
 ### 心跳（兼容模式）
 
 **心跳 (Heartbeat)**:

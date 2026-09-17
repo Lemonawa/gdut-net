@@ -9,6 +9,7 @@ use windows::Win32::UI::WindowsAndMessaging::{MB_ICONERROR, MB_ICONWARNING, MESS
 use crate::win32::wide;
 
 pub mod silent;
+mod transaction;
 pub mod ui;
 pub mod work;
 
