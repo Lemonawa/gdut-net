@@ -69,7 +69,8 @@
 2. FlClash 的 HelperService 会把代理写回 1——不要开 FlClash。
 3. **不要给 Mihomo 设 `interface-name`**（2026-09-10 实证）：无线接管期间该接口不存在，mihomo 每个出站都硬错 `interface not found`，无回退 → Clash 全 timeout。mihomo 的 auto-detect 按"非虚拟 up 接口中总 metric 最低者"选路，本机有线自动选 `gdut`(PPP)、无线自动选 `WLAN`，四组合（有/无线 × TUN 开/关）均实测正确。TUN MTU≤1400。
 4. Verge 配置注入点是 `profiles/Merge.yaml`，别手改生成的 `clash-verge.yaml`；改完必须**完整退出并重启 Verge 进程**才重新合并。
-5. WSL 是 mirror 模式跟主机路由；直连走 TUN 即可（fake-ip 已退役为 redir-host）。
+6. WSL 是 mirror 模式跟主机路由；直连走 TUN 即可（fake-ip 已退役为 redir-host）。
+7. Google 会长期通告 QUIC Alt-Svc；本机 2026-09-20 实测 MTU=1480 后 TCP/H2 正常但 Google H3 仍超时。浏览器局部卡住先禁 `chrome://flags/#enable-quic`，同时用本地 mixed port 对照区分节点与 TUN 故障。
 
 ## 校园网反制（2026-09-16 实测）
 

@@ -70,7 +70,7 @@ reg query "HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\gdut-net"
 | 8 | standby：拔线零感知 | 托盘切 "Wired + wireless standby"，常驻 ping 窗口拔线观察丢包 ≤2 个；插回线 WLAN 不断（仍 Online） |
 | 9 | 模式持久化 | 切 standby → `net stop/start gdut-net` → status 的 Mode 仍为 standby |
 | 10 | 路由/指标无残留 | 服务停止后 `route print` 无 `10.0.3.2 /32`、`223.5.5.5 /32`；WLAN metric 还原 4270（`Get-NetIPInterface -InterfaceAlias WLAN`） |
-| 11 | TUN 共存（四组合） | Mihomo TUN 开/关 × 有/无线，各跑一次 `curl -x http://127.0.0.1:7890 https://www.gstatic.com/generate_204`（期望 204）；Clash Verge 延迟测试有数字。前置：Merge.yaml 无 `interface-name`（2026-09-10 起，mihomo auto-detect 自动选 gdut/WLAN） |
+| 11 | TUN 共存（四组合） | Mihomo TUN 开/关 × 有/无线，各跑一次 `curl -x http://127.0.0.1:7890 https://www.gstatic.com/generate_204`（期望 204）；Clash Verge 延迟测试有数字。前置：Merge.yaml 无 `interface-name`；Verge ≥2.5.4 另需在 TUN GUI 弹窗确认 MTU=1480 与排除网段未丢（2026-09-20 实测保存热生效）。再跑一次浏览器打开 Google/Cloudflare；若 Google 局部卡住，禁 Chrome QUIC 后复测 |
 | 12 | RasMan 卡死自愈（内建未实测） | 人为制造：无网线状态下让旧流程拨号 → 连续 756 时观察 `Dial port stuck (error 756 x3), restarting RasMan` 与 `RasMan restarted, port state cleared`；插线后能拨通。若服务无权限停/启 RasMan，日志为 warn 且不影响其他功能 |
 
 ## 安装器与日常 GUI（安装形态，ADR-0007）

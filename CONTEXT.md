@@ -102,7 +102,8 @@ setup 文件尾部追加 `[files][TOC][footer]` 的自定义容器：footer 24B�
 - 无线接管的一切发包（portal 登录、ICMP/HTTP 探针）显式绑 WLAN 适配器源 IP；WLAN 会话存活期间服务自管两条 /32 主机路由（portal 主机 + HTTP 探测目标，via WLAN 网关），否则 Mihomo TUN 覆盖路由下绑源 socket `ENETUNREACH`。增删与让位/切模式/服务停止三条出口绑定，启动清残留。
 - 含密码的 portal URL 永不落日志/事件尾巴（打码只留 host+path）。
 - **拔线期间绝不拨号**：无载波拨号会把 PPPoE 端口卡在 dialing 态，之后所有拨号返回 756 且重试无法清除（实测只能重启 RasMan/系统）。服务已内建：link gate（链路 down 时 5s 轮询不碰端口）+ 插线瞬间 `request_redial` + 连续 3 次 756/813 自动重启 RasMan。
-- **不得给 Mihomo 设 `interface-name`**（2026-09-10 实证）：显式绑 `gdut` 在无线接管时全超时（该接口不存在 → 每个出站硬错 `interface not found`，无回退）；mihomo auto-detect（sing-tun 按"非虚拟 up 接口中总有效 metric 最低者"）在本机自动正确选 `gdut`/`WLAN`。Merge.yaml 保持无此键，改后需完整重启 Verge（重合并只在进程重启时发生）。
+- **不得给 Mihomo 设 `interface-name`**（2026-09-10 实证）：显式绑 `gdut` 在无线接管时全超时（该接口不存在 → 每个出站硬错 `interface not found`，无回退）；mihomo auto-detect（sing-tun 按"非虚拟 up 接口中总有效 metric 最低者"）在本机自动正确选 `gdut`/`WLAN`。Merge.yaml 保持无此键。
+- Clash Verge Rev ≥2.5.4 将 `tun.mtu` / `tun.route-exclude-address` 改为 GUI 设置优先，Merge 中的同名字段会被 GUI 值覆盖。两者必须在 Verge“系统设置 → 虚拟网卡模式”弹窗维护；本机 2026-09-20 实测保存后热生效，无需重启。本机路径 MTU 实测 1480，当前 TUN MTU=1480；排除段含 RFC1918、家宽公网段与 Parsec STUN /32。
 - WLAN 接口 metric 压制（standby 与 exclusive 接管期）：目标 100 —— 低于物理口 4250、高于 PPP 26，保证有线健康时有线优先、有线路径消失瞬间无线接替。切走/让位/停止时还原。
 - 心跳相关的一切发包绑定物理适配器，绑定失败（端口 61440 被官方客户端占用）视为兼容模式不可用，报错而非静默。
 - "掉线"以流量探测为准，不单看 RAS 状态。
@@ -159,7 +160,8 @@ setup 文件尾部追加 `[files][TOC][footer]` 的自定义容器：footer 24B�
 
 ### 代理 / Verge 排障
 - `ProxyEnable` 存 HKCU 重启不清零；是否翻回只看自启动项（`HKCU/HKLM\...\Run` 应无 FlClash/Verge/clash 系）。回写是事件驱动的（FlClash HelperService 定时写回，GUI 开关脱节）；深挖用注册表审计（中文系统 auditpol 子类别"注册表"）+ `Get-WinEvent ID=4657` 看进程名；历史定案是改 `Connections\gdut` blob（flags bit1）+ `MigrateProxy` 置 0，而非杀进程。
-- Verge 改 `Merge.yaml` 必须**完整退出并重启 Verge 进程**才重新合并；TUN 状态看 `Get-NetAdapter Mihomo` + `0.0.0.0/0` 路由在不在。
+- Verge 改 `Merge.yaml` 必须**完整退出并重启 Verge 进程**才重新合并；TUN GUI 弹窗保存则热生效（2.5.4 实测）。TUN 状态看 `Get-NetAdapter Mihomo` + `0.0.0.0/0` 路由在不在。
+- Google 类站点在 Chrome 里可能拿到 `alt-svc: h3` 后尝试 QUIC；2026-09-20 本机 TUN MTU=1480 时 TCP/H2 已恢复且 Google ≈0.5s，但 `curl --http3-only` 对 Google 仍超时（H3 握手能到 2.3s，后续无响应）。若浏览器偶发局部卡住，先在 `chrome://flags/#enable-quic` 禁用 QUIC，不要把 TCP 恢复误判成 MTU 未生效。
 - fake-ip 已退役为 redir-host（频繁重启内核 + 系统 DNS 缓存下，旧映射进缓存即 RST）；国外慢先换节点再怪内核（固定 5.1s×N 次 = 节点晚高峰）。
 - **拨 TUN 开关必重启 opencode/长连接进程**（TCP 无迁移，SSE 静默死亡）；判新老连接用 `curl ai.lma.moe/v1/models`（401 = 新连接活）。
 - Tailscale 家↔校不能直连（校园 CGNAT = 对称 NAT + 端口重写 + 多 ISP 池；家路由器按远端过滤）；修复在家侧：开 UPnP 或转发 UDP 41641→192.168.5.11；全案 `docs/tailscale-p2p.md`。
