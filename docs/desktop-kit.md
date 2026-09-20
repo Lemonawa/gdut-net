@@ -67,8 +67,9 @@
 
 1. 查代理只信注册表（开始菜单"代理检查"），不信任何 GUI 开关。
 2. FlClash 的 HelperService 会把代理写回 1——不要开 FlClash。
-3. **不要给 Mihomo 设 `interface-name`**（2026-09-10 实证）：无线接管期间该接口不存在，mihomo 每个出站都硬错 `interface not found`，无回退 → Clash 全 timeout。mihomo 的 auto-detect 按"非虚拟 up 接口中总 metric 最低者"选路，本机有线自动选 `gdut`(PPP)、无线自动选 `WLAN`，四组合（有/无线 × TUN 开/关）均实测正确。TUN MTU≤1400。
-4. Verge 配置注入点是 `profiles/Merge.yaml`，别手改生成的 `clash-verge.yaml`；改完必须**完整退出并重启 Verge 进程**才重新合并。
+3. **不要给 Mihomo 设 `interface-name`**（2026-09-10 实证）：无线接管期间该接口不存在，mihomo 每个出站都硬错 `interface not found`，无回退 → Clash 全 timeout。mihomo 的 auto-detect 按"非虚拟 up 接口中总有效 metric 最低者"选路，本机有线自动选 `gdut`(PPP)、无线自动选 `WLAN`，四组合（有/无线 × TUN 开/关）均实测正确。
+4. Clash Verge Rev ≥2.5.4：TUN MTU 与“排除自定义网段”在“系统设置 → 虚拟网卡模式 → 齿轮”弹窗维护，GUI 值优先于 `Merge.yaml`；保存热生效，勿点“恢复默认”。2026-09-20 DF ping 实测路径 MTU=1480，当前使用 1480（1481 即需分片）。排除段：`127/8`、`169.254/16`、`172.16/12`、`192.168/16`、`10/8`、`113.75.184.0/20`、Parsec STUN 三个 /32。
+5. Verge 仍可用 `profiles/Merge.yaml` 注入 DNS 等 GUI 未管理字段，别手改生成的 `clash-verge.yaml`；改 Merge 后完整退出并重启 Verge。
 6. WSL 是 mirror 模式跟主机路由；直连走 TUN 即可（fake-ip 已退役为 redir-host）。
 7. Google 会长期通告 QUIC Alt-Svc；本机 2026-09-20 实测 MTU=1480 后 TCP/H2 正常但 Google H3 仍超时。浏览器局部卡住先禁 `chrome://flags/#enable-quic`，同时用本地 mixed port 对照区分节点与 TUN 故障。
 
