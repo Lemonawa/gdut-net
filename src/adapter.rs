@@ -58,6 +58,7 @@ mod win {
         pub gateway: Option<Ipv4Addr>,
         pub ifindex: u32,
         pub oper_up: bool,
+        pub has_dns: bool,
     }
 
     /// 未启用 is_virtual 过滤前的选择条件（按 IfType/OperStatus 等）。
@@ -105,21 +106,20 @@ mod win {
         None
     }
 
-    /// 把 PPPoE 接口的 IPv4 DNS 收走（netsh 侧）。
-    fn set_ppp_dns(name: &str, source: &str) -> Result<()> {
+    /// 把 PPPoE 接口的 IPv4 DNS 置空（netsh 侧）。只做这一件事：
+    /// 2026-09-23 实测二次写回（source=dhcp）会触发 PPP 会话重协商，约 30s 后会话被判 dropped。
+    fn set_ppp_dns_none(name: &str) -> Result<()> {
         let name_arg = format!("name={name}");
-        let mut args = vec![
+        let args = [
             "interface",
             "ipv4",
             "set",
             "dnsservers",
             name_arg.as_str(),
-            source,
+            "source=static",
+            "address=none",
         ];
-        if source == "source=static" {
-            args.push("address=none");
-        }
-        let out = std::process::Command::new("netsh").args(&args).output()?;
+        let out = std::process::Command::new("netsh").args(args).output()?;
         if !out.status.success() {
             return Err(anyhow!(
                 "netsh {} failed: {}",
@@ -128,6 +128,16 @@ mod win {
             ));
         }
         Ok(())
+    }
+
+    /// 除 PPP 外是否还有 up 状态的接口带着 DNS（清 PPP DNS 的前置条件）。
+    pub(super) fn other_adapter_has_dns() -> bool {
+        let selector: Box<Selector> = Box::new(|a: &IP_ADAPTER_ADDRESSES_LH| {
+            a.IfType != IF_TYPE_PPP && a.OperStatus == IfOperStatusUp
+        });
+        adapters(&selector)
+            .map(|v| v.iter().any(|a| a.has_dns))
+            .unwrap_or(false)
     }
 
     fn resolves(host: &str) -> bool {
@@ -149,23 +159,36 @@ mod win {
     /// 见 `super::detach_ppp_dns`。
     pub(super) fn detach_ppp_dns(entry_name: &str) {
         const PROBE: &str = "www.baidu.com";
-        if let Err(e) = set_ppp_dns(entry_name, "source=static") {
+        if !other_adapter_has_dns() {
+            // 物理口没 DNS 时不动 PPP 的，避免把解析清没。
+            log::info!("Skip detaching PPP DNS: no other up adapter carries DNS");
+            return;
+        }
+        if let Err(e) = set_ppp_dns_none(entry_name) {
             log::warn!("Clear PPP DNS failed ({e:#}); keeping RAS-provided DNS");
             return;
         }
-        if !resolves(PROBE) {
-            log::warn!("DNS broke after clearing PPP DNS, restoring RAS-provided DNS");
-            if let Err(e) = set_ppp_dns(entry_name, "source=dhcp") {
-                log::error!("Restore RAS-provided DNS failed: {e:#}");
+        // 只观测、不回写：写回会重协商 PPP 会话（见 set_ppp_dns_none 注释）。
+        // 真出问题也只是当前会话，下次拨号 RAS 重新下发即恢复。
+        for attempt in 0..4u32 {
+            if attempt > 0 {
+                std::thread::sleep(std::time::Duration::from_millis(1200));
             }
-            return;
+            if resolves(PROBE) {
+                let aaaa = if has_aaaa(PROBE) {
+                    "AAAA ok"
+                } else {
+                    "AAAA missing"
+                };
+                log::info!(
+                    "PPP interface '{entry_name}' DNS detached (physical NIC serves DNS; {aaaa})"
+                );
+                return;
+            }
         }
-        let aaaa = if has_aaaa(PROBE) {
-            "AAAA ok"
-        } else {
-            "AAAA missing"
-        };
-        log::info!("PPP interface '{entry_name}' DNS detached (physical NIC serves DNS; {aaaa})");
+        log::warn!(
+            "DNS still failing after detaching PPP DNS; leaving as-is (next dial restores RAS-provided DNS)"
+        );
     }
 
     /// GetAdaptersAddresses 两次调用法：先探缓冲区大小再正式取。
@@ -209,6 +232,7 @@ mod win {
                     gateway: gateway_ipv4(a),
                     ifindex: unsafe { a.Anonymous1.Anonymous.IfIndex },
                     oper_up: a.OperStatus == IfOperStatusUp,
+                    has_dns: !a.FirstDnsServerAddress.is_null(),
                 });
             }
             node = a.Next;
@@ -318,7 +342,9 @@ pub fn physical_adapter() -> Result<AdapterInfo> {
 /// 2026-09-23 真机实测：PPP 接口只要带着 RAS 下发的 DNS，Windows DNS 客户端就不向应用层
 /// 交付 AAAA（`ping -6`/`curl -6`/`getaddrinfo` 全空，而 `nslookup` 正常）；清空后立刻恢复，
 /// 重拨后 RAS 重新下发即再次失效——所以每次拨号成功后都要卸一次。
-/// 卸完用 getaddrinfo 复核；解析不可用则退回自动（RAS 下发），绝不把 DNS 清没。
+/// 只在**别的 up 接口确实带 DNS** 时才清（否则不动）；清完用 getaddrinfo 复核，只记录结论、
+/// **不主动写回**——二次 netsh 写会触发 PPP 会话重协商（2026-09-23 实测 30s 后 dropped 触发回滚），
+/// 真出问题也只是当前会话，下次拨号 RAS 会重新下发 DNS 自愈。
 #[cfg(windows)]
 pub fn detach_ppp_dns(entry_name: &str) {
     win::detach_ppp_dns(entry_name)
