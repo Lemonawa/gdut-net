@@ -180,6 +180,13 @@ setup 文件尾部追加 `[files][TOC][footer]` 的自定义容器：footer 24B�
 - 所以"编辑规则"= 改该订阅 `option.rules` 指向的那个文件（`profiles/<uid>.yaml`）里的 `prepend`/`append`/`delete`（结构见 `enhance/seq.rs::use_seq`：prepend 拼在订阅规则前）。**光往 `profiles/*.yaml` 里写不改 `option.rules` 不会生效**；改完要完整退出并重启 Verge 进程。
 - `tun.*` 的 GUI 键（MTU/route-exclude 等）另由 `enhance/tun.rs::enforce_tun` 在最后覆盖，仍以 GUI 为准。
 
+### 浏览器侧 `ERR_CONNECTION_CLOSED`（2026-09-23 实测）
+- 症状：微信/公众号页在 Chrome 报 `ERR_CONNECTION_CLOSED`，而 `curl` v4/经代理均 200、独立 Chromium 也能开。
+- 排查路径（系统层先自证清白）：`Resolve-DnsName` 看该域名 AAAA 是否为空 → `curl -4/-6/经代理` 三通路 → 开一个
+  **独立/无痕**浏览器对照 → 若独立浏览器正常，就是该 Chrome 实例的站点状态（缓存/连接复用/扩展）：先 `Ctrl+Shift+N` 无痕对照，
+  再清该站站点数据（`chrome://settings/content/all`）；仍不行用 `chrome://net-export/` 抓一份日志定位。
+- 注意：FlushDNS 不会清 Chrome 自己的缓存（Chrome 重启一次才会丢内存态）。
+
 ### 校内域名走校内解析器（2026-09-23 实测，含更正）
 - 现象：镜像站 `mirrors.gdut.edu.cn` 右侧「域名选择」组件探测失败/空白（`mirrors4/6.gdut.edu.cn`）。
 - 处置：`Merge.yaml` → `dns.nameserver-policy` 加 `'+.gdut.edu.cn': ['10.1.3.38']`（10.1.3.38 在 TUN 排除段 10/8 内），
