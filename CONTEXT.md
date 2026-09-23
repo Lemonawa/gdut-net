@@ -185,6 +185,9 @@ setup 文件尾部追加 `[files][TOC][footer]` 的自定义容器：footer 24B�
 - 处置：`Merge.yaml` → `dns.nameserver-policy` 加 `'+.gdut.edu.cn': ['10.1.3.38']`（10.1.3.38 在 TUN 排除段 10/8 内），
   组件随即恢复；镜像可走原生 v6 `2001:da8:2018:f666::6666`（curl -6 200 / 18ms）。
 - **更正**（当晚 dnspyre + 绑源直查，临时关 TUN `dns-hijack` 复测）：AliDNS `223.5.5.5`、DNSPod `119.29.29.29`、
+- 测量口径（2026-09-23 晚，dnspyre）：明文 UDP 对比**必须临时把 TUN `dns-hijack` 置空**（该键属 Verge GUI 托管，
+  改 Merge 无效；改 `…clash-verge-rev\config.yaml` 后重启 Verge，测完还原），否则打到的是 mihomo 自己（0ms/答案同源）；
+  dnspyre 无绑源选项（绑 PPP 源地址的垫层对公网 IP 不生效）。加密路径（DoT 853/850）不经 :53，不受劫持，可直接测。
   udns `42.194.232.31` 的**明文**查询也能解出 `mirrors4/6.gdut.edu.cn` —— 早先"校内记录只有校园 DNS 有"**不成立**；
   当时症状更像 mihomo 的 DoT/DoH 解析链路或其 DNS 缓存问题（重启 + 策略后恢复）。
   保留该条策略的理由改为"显式归属"：校内域名固定用校内解析器，不依赖公网解析器对校内记录的态度。
