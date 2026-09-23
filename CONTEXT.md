@@ -180,14 +180,17 @@ setup 文件尾部追加 `[files][TOC][footer]` 的自定义容器：footer 24B�
 - 所以"编辑规则"= 改该订阅 `option.rules` 指向的那个文件（`profiles/<uid>.yaml`）里的 `prepend`/`append`/`delete`（结构见 `enhance/seq.rs::use_seq`：prepend 拼在订阅规则前）。**光往 `profiles/*.yaml` 里写不改 `option.rules` 不会生效**；改完要完整退出并重启 Verge 进程。
 - `tun.*` 的 GUI 键（MTU/route-exclude 等）另由 `enhance/tun.rs::enforce_tun` 在最后覆盖，仍以 GUI 为准。
 
-### 校内域名必须走校园 DNS（2026-09-23 实测）
-- 现象：镜像站 `mirrors.gdut.edu.cn` 右侧「域名选择」组件一直探测失败/空白。
-- 根因：`mirrors4/6.gdut.edu.cn` 与 `mirrors.gdut.edu.cn` 的 AAAA 是**校园 DNS 独有记录**，
-  TUN 的 DNS 劫持把它们送给公网上游（AliDNS/udns）→ NXDOMAIN。
-- 修法：`Merge.yaml` → `dns.nameserver-policy` 加 `'+.gdut.edu.cn': ['10.1.3.38']`；
-  10.1.3.38 落在 GUI route-exclude 的 `10/8` 内，mihomo 直连可达。回退：删掉该行重启 Verge。
-- 修完效果：三域名解析正常，镜像走原生 v6 `2001:da8:2018:f666::6666`（`curl -6` 200 / 18ms）。
-
+### 校内域名走校内解析器（2026-09-23 实测，含更正）
+- 现象：镜像站 `mirrors.gdut.edu.cn` 右侧「域名选择」组件探测失败/空白（`mirrors4/6.gdut.edu.cn`）。
+- 处置：`Merge.yaml` → `dns.nameserver-policy` 加 `'+.gdut.edu.cn': ['10.1.3.38']`（10.1.3.38 在 TUN 排除段 10/8 内），
+  组件随即恢复；镜像可走原生 v6 `2001:da8:2018:f666::6666`（curl -6 200 / 18ms）。
+- **更正**（当晚 dnspyre + 绑源直查，临时关 TUN `dns-hijack` 复测）：AliDNS `223.5.5.5`、DNSPod `119.29.29.29`、
+  udns `42.194.232.31` 的**明文**查询也能解出 `mirrors4/6.gdut.edu.cn` —— 早先"校内记录只有校园 DNS 有"**不成立**；
+  当时症状更像 mihomo 的 DoT/DoH 解析链路或其 DNS 缓存问题（重启 + 策略后恢复）。
+  保留该条策略的理由改为"显式归属"：校内域名固定用校内解析器，不依赖公网解析器对校内记录的态度。
+- 测速对照（每台 360 查询，A+AAAA×9 域名×10 轮×2 并发）：明文 UDP 七台都 0–1ms（校内 4 台 / AliDNS / DNSPod / udns）；
+  实际加密链路 AliDNS DoT:853 ≈6ms、udns DoT:850 ≈8ms（p99 13/91ms）——差距主要是 TLS 开销。
+  被墙域名的 A 各家返回**不同**的污染 IP（google: 185.45.x/157.240.x/69.171.x…），都不可信。
 ### 微信卡顿 = CN v6 路由错配（2026-09-23 实测）
 - 现象：微信（`Weixin`/`WeChatAppEx`）连接源地址是 TUN 的 `fdfe:dcba:9876::1`，目标是腾讯 v6 `2402:4e00:a2:f0::9:443`。
 - 实测三条路径：直连腾讯 v6 = 3/3 超时（ICMP 100% 丢，校园 v6 到不了该段）；走节点 = 200 但 TLS 82ms/TTFB 169ms；CN 直连基准（百度 v6/v4）= TLS 30ms / TTFB 41ms。即"兜底 MATCH,Final 把不可达的 CN v6 丢给节点"，微信因此长轮询全程 169ms。
