@@ -191,8 +191,7 @@ setup 文件尾部追加 `[files][TOC][footer]` 的自定义容器：footer 24B�
 ### 微信卡顿 = CN v6 路由错配（2026-09-23 实测）
 - 现象：微信（`Weixin`/`WeChatAppEx`）连接源地址是 TUN 的 `fdfe:dcba:9876::1`，目标是腾讯 v6 `2402:4e00:a2:f0::9:443`。
 - 实测三条路径：直连腾讯 v6 = 3/3 超时（ICMP 100% 丢，校园 v6 到不了该段）；走节点 = 200 但 TLS 82ms/TTFB 169ms；CN 直连基准（百度 v6/v4）= TLS 30ms / TTFB 41ms。即"兜底 MATCH,Final 把不可达的 CN v6 丢给节点"，微信因此长轮询全程 169ms。
-- 处置（最终）：**不要用 REJECT**——浏览器收到 RST 直接报“意外终止了连接”（实测 `mp.weixin.qq.com`），不会优雅回落 v4。
-- 最终方案：Merge.yaml → `dns.nameserver-policy` 把腾讯/微信域名指向校园 DNS `10.1.3.38`（实测它对 AAAA 返回空）→ 应用层只拿到 A，自然走 v4（v4 命中 GEOIP,CN → DIRECT，20-40ms）；教育网段在订阅 `option.rules`（`rkSjO3zIps3Q.yaml`）里保持 DIRECT。
+- 处置（最终）：`Merge.yaml` → `dns.nameserver-policy` 把腾讯/微信域名指向校园 DNS `10.1.3.38`；实测（2026-09-23 晚）**四台校园 DNS 都会返回 AAAA**，所以压制并非来自'服务器不回 AAAA'——更正早先记录。效果仍已验证：mihomo 与系统层对 `*.qq.com` 的 AAAA 为空、微信走 v4（20-40ms）。机制疑为 mihomo `fallback-filter`（本地 geodata 未把 `2402:4e00::` 标为 CN → 视为污染答案 → 走 fallback，fallback 无 AAAA）→ **待查**。教育网段在订阅 `option.rules`（`rkSjO3zIps3Q.yaml`）里保持 DIRECT。
 - 判据备忘：`curl -6 --resolve <域名>:443:[<v6>]` 看 TLS/TTFB 区分"直连 / 走节点 / 不通"（CN 直连 ~30ms TLS，走节点 ~80ms TLS）；`Get-NetTCPConnection -OwningProcess <verge-mihomo>` 看 mihomo 出站到底连的是目标 IP（DIRECT）还是固定境外 IP（代理）。
 ### NCSI 网络徽标与热点反制（2026-09-16 实测）
 - 物理以太网永远显示"无法访问 Internet"（`Get-NetConnectionProfile` → `LocalNetwork`）是双出口拓扑的**真实判定**，不是故障：校园有线 L3 需 PPPoE，物理口直连只有内网。Win11 的 NCSI 由 `netprofm`（Network List Service）承载；"到 Internet 的下一跳"是**全系统选举**，PPP 会话（有效 metric 26）一上线就夺走它。
