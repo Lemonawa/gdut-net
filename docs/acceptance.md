@@ -25,6 +25,20 @@ net start gdut-net                # 再次启动自动重拨成功
 | 4 | 关心跳 72h 不掉线；开心跳现场验证 | `heartbeat.enabled=false` 挂机 72h，日志无"判定掉线"（或仅极少数且自动恢复）；需要验证兼容模式时 `enabled=true`，在**物理网卡**上核对端口 61440 出现 20s 周期 keepalive |
 | 5 | 卸载干净 | `.\gdut-net.exe uninstall --purge` 后：`sc.exe query gdut-net` → 1060（不存在）；`reg query "HKLM\SYSTEM\CurrentControlSet\Services\EventLog\Application\gdut-net"` → 拒绝访问/不存在；`reg query "HKLM\SOFTWARE\gdut-net"` → 不存在；`C:\ProgramData\gdut-net` 已删除 |
 
+## 原生 IPv6（2026-09-23，v0.4.1）
+
+- 拨号条目：`C:\ProgramData\gdut-net\gdut.pbk` 的 `[gdut]` 段应为 `ExcludedProtocols=0`
+  （旧版本写成 `8` = 排除 `RASNP_Ipv6` → IPV6CP 不协商，链路永远没有 v6）。
+- 拨号成功后：`Get-NetIPAddress -InterfaceAlias gdut -AddressFamily IPv6` 出现
+  `PrefixOrigin=RouterAdvertisement` 的全局地址；`Get-NetRoute -AddressFamily IPv6 -DestinationPrefix ::/0`
+  有 gdut 条目；`Get-NetConnectionProfile` 中 gdut 项 = `Internet/Internet`。
+- PPP 接口不承载 DNS：`Get-DnsClientServerAddress` 里 gdut 的 IPv4 列表应为空（DNS 由物理口提供），
+  服务日志出现 `PPP interface 'gdut' DNS detached (physical NIC serves DNS; AAAA ok)`。
+  反例（必现）：PPP 带 DNS 时 Windows 不向应用交付 AAAA —— `ping -6 域名`/`curl -6 域名` 全空而 `nslookup` 正常。
+- 直连冒烟：`curl --noproxy "*" -6 -k -o NUL -w "%{http_code}" https://www.baidu.com/` = 200；
+  `ping -6` 到 CN v6 目标 0% 丢包。
+- 判据提醒：本机 TUN 路径下 ICMP 会被本地合成（不存在的地址也"0% 丢包"），可用性一律用 TCP/TLS 判。
+
 ## 服务与事件日志检查
 
 ```powershell

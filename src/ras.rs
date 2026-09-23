@@ -45,7 +45,7 @@ mod win {
     use windows::core::PCWSTR;
     use windows::Win32::NetworkManagement::Rras::{
         self, ET_Require, RASCM_Password, RASCM_UserName, RASCS_Disconnected, RASET_Broadband,
-        RASFP_Ppp, RASNP_Ip, RASNP_Ipx, RASNP_NetBEUI, RasDialW, RasEnumConnectionsW,
+        RASFP_Ppp, RASNP_Ip, RASNP_Ipv6, RASNP_Ipx, RASNP_NetBEUI, RasDialW, RasEnumConnectionsW,
         RasGetConnectStatusW, RasGetErrorStringW, RasHangUpW, RasSetCredentialsW,
         RasSetEntryPropertiesW, HRASCONN, RASCONNSTATUSW, RASCONNW, RASCREDENTIALSW,
         RASDIALPARAMSW, RASENTRYW,
@@ -95,15 +95,18 @@ mod win {
 
     /// 幂等创建/更新宽带拨号条目：PPPoE + WAN Miniport (PPPoE)。
     ///
-    /// `dwfNetProtocols` 必须含 `RASNP_Ip`（本机验证可用取值 7：NetBEUI+Ipx+Ip）。
-    /// default() 的 0 会让 RAS 排除 IP 协议族，PPPoE IPCP 无法协商 → 错误 720。
+    /// `dwfNetProtocols` 必须含 `RASNP_Ip`；0 会让 RAS 排除 IP 协议族，PPPoE IPCP 无法协商 → 错误 720。
+    /// 同时必须含 `RASNP_Ipv6`（=8）：RAS 会把补集写入 pbk 的 `ExcludedProtocols`，
+    /// 只给 7 时得到 `ExcludedProtocols=8` → PPPoE 不协商 IPV6CP，链路永远没有 v6
+    /// （2026-09-23 真机验证：宿舍 PPPoE 本身支持 v6，置位后立刻拿到 RA 下发的全局地址 + ::/0，
+    /// 直连 ping/curl v6 均通；对照系统自带"宽带连接"条目为 `ExcludedProtocols=0`）。
     /// `dwEncryptionType=ET_Require` 要求加密密码。
     pub fn ensure_entry(pbk: &str, name: &str) -> Result<()> {
         let entry = RASENTRYW {
             dwSize: size_of::<RASENTRYW>() as u32,
             dwType: RASET_Broadband,
             dwFramingProtocol: RASFP_Ppp,
-            dwfNetProtocols: RASNP_Ip | RASNP_Ipx | RASNP_NetBEUI,
+            dwfNetProtocols: RASNP_Ip | RASNP_Ipv6 | RASNP_Ipx | RASNP_NetBEUI,
             dwEncryptionType: ET_Require,
             szDeviceType: wide("PPPoE", 17)
                 .try_into()
@@ -262,6 +265,9 @@ mod win {
                 },
             });
         }
+        // 拨号成功后收走 PPP 接口的 DNS：PPP 带 DNS 会让 Windows 对应用隐藏 AAAA
+        // （2026-09-23 实测，详见 adapter::detach_ppp_dns）。
+        crate::adapter::detach_ppp_dns(name);
         Ok(RasSession { handle })
     }
 

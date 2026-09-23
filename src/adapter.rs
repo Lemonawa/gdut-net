@@ -105,6 +105,69 @@ mod win {
         None
     }
 
+    /// 把 PPPoE 接口的 IPv4 DNS 收走（netsh 侧）。
+    fn set_ppp_dns(name: &str, source: &str) -> Result<()> {
+        let name_arg = format!("name={name}");
+        let mut args = vec![
+            "interface",
+            "ipv4",
+            "set",
+            "dnsservers",
+            name_arg.as_str(),
+            source,
+        ];
+        if source == "source=static" {
+            args.push("address=none");
+        }
+        let out = std::process::Command::new("netsh").args(&args).output()?;
+        if !out.status.success() {
+            return Err(anyhow!(
+                "netsh {} failed: {}",
+                args.join(" "),
+                String::from_utf8_lossy(&out.stdout).trim()
+            ));
+        }
+        Ok(())
+    }
+
+    fn resolves(host: &str) -> bool {
+        use std::net::ToSocketAddrs;
+        (host, 443)
+            .to_socket_addrs()
+            .map(|mut it| it.next().is_some())
+            .unwrap_or(false)
+    }
+
+    fn has_aaaa(host: &str) -> bool {
+        use std::net::{SocketAddr, ToSocketAddrs};
+        (host, 443)
+            .to_socket_addrs()
+            .map(|mut it| it.any(|a| matches!(a, SocketAddr::V6(_))))
+            .unwrap_or(false)
+    }
+
+    /// 见 `super::detach_ppp_dns`。
+    pub(super) fn detach_ppp_dns(entry_name: &str) {
+        const PROBE: &str = "www.baidu.com";
+        if let Err(e) = set_ppp_dns(entry_name, "source=static") {
+            log::warn!("Clear PPP DNS failed ({e:#}); keeping RAS-provided DNS");
+            return;
+        }
+        if !resolves(PROBE) {
+            log::warn!("DNS broke after clearing PPP DNS, restoring RAS-provided DNS");
+            if let Err(e) = set_ppp_dns(entry_name, "source=dhcp") {
+                log::error!("Restore RAS-provided DNS failed: {e:#}");
+            }
+            return;
+        }
+        let aaaa = if has_aaaa(PROBE) {
+            "AAAA ok"
+        } else {
+            "AAAA missing"
+        };
+        log::info!("PPP interface '{entry_name}' DNS detached (physical NIC serves DNS; {aaaa})");
+    }
+
     /// GetAdaptersAddresses 两次调用法：先探缓冲区大小再正式取。
     pub(super) fn adapters(selector: &Selector) -> Result<Vec<RawAdapter>> {
         let mut size: u32 = 15 * 1024;
@@ -248,6 +311,17 @@ mod win {
 #[cfg(windows)]
 pub fn physical_adapter() -> Result<AdapterInfo> {
     win::physical_adapter()
+}
+
+/// 拨号成功后卸掉 PPP 接口的 IPv4 DNS（DNS 交给物理口）。
+///
+/// 2026-09-23 真机实测：PPP 接口只要带着 RAS 下发的 DNS，Windows DNS 客户端就不向应用层
+/// 交付 AAAA（`ping -6`/`curl -6`/`getaddrinfo` 全空，而 `nslookup` 正常）；清空后立刻恢复，
+/// 重拨后 RAS 重新下发即再次失效——所以每次拨号成功后都要卸一次。
+/// 卸完用 getaddrinfo 复核；解析不可用则退回自动（RAS 下发），绝不把 DNS 清没。
+#[cfg(windows)]
+pub fn detach_ppp_dns(entry_name: &str) {
+    win::detach_ppp_dns(entry_name)
 }
 
 /// 取 PPPoE 会话适配器的 IPv4（拨号成功后）。

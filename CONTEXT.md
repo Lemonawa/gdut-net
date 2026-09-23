@@ -128,6 +128,14 @@ setup 文件尾部追加 `[files][TOC][footer]` 的自定义容器：footer 24B�
 - `RasSetEntryPropertiesW` 返回 `816`（端口占用）视为成功（端口释放后可拨），勿当硬错。
 - 无载波拨号会把 PPPoE 端口卡在 dialing 态 → 之后所有拨号 `756`，重试无法清除（详见上文 Rules + link gate 设计）。
 - `service` 停止后进程可能残留致重装 `1073`；`service_run` 显式 `std::process::exit` 兜底；`install` 幂等（`1073` → `change_config`）。
+- PPPoE 条目必须置 `RASNP_Ipv6`（=8）：`RASENTRYW.dwfNetProtocols` 只给 `RASNP_Ip|RASNP_Ipx|RASNP_NetBEUI`（值 7）时，RAS 会把补集写进 pbk 的 `ExcludedProtocols=8`，IPV6CP 根本不协商 → 链路永远没有 v6。2026-09-23 真机实测：宿舍 PPPoE 本身**支持** v6，置位后立刻拿到 RA 全局地址 `240c:cd22::/64` + `::/0`（网关 = 对端 link-local），直连 ping/curl v6 全通，`Get-NetConnectionProfile` = Internet/Internet；系统自带"宽带连接"条目为 `ExcludedProtocols=0` 可作对照。`Ipv6PrioritizeRemote` 0/1 都能起（与结论无关）。
+
+### IPv6 / DNS 解析（2026-09-23 实测）
+- 本机前缀策略表曾被改成 IPv4 优先（`netsh interface ipv6 show prefixpolicies` 只剩 `::ffff:0:0/96` @45）；已按 Windows 默认恢复 9 条（`::1/128 50 0`、`::/0 40 1`、`::ffff:0:0/96 35 4`、`2002::/16 30 2`、`2001::/32 5 5`、`fc00::/7 3 13`、`3ffe::/16 1 12`、`::/96 1 3`、`fec0::/10 1 11`）。恢复后 AAAA 问题依旧 → 不是真因，但该表被篡改本身就该修。
+- **已定位（2026-09-23）**：只要 PPP 接口带着 RAS 下发的 v4 DNS，Windows DNS 客户端就不向应用层交付 AAAA —— `ping -6 域名`/`curl -6 域名`/`getaddrinfo` 全空，而 `nslookup -type=AAAA`、`Resolve-DnsName -Server <ip>` 正常，`Get-DnsClientCache` 里只有 A。对照实验：清空 PPP 接口 DNS（DNS 交给物理口）→ 立刻恢复；重拨后 RAS 重新下发 → 立刻再次失效。服务器与链路本身没问题（绑定 PPP 源地址的原生 UDP 查询实测 `www.qq.com/AAAA` rcode=0 an=1）。
+- 产品对策：`adapter::detach_ppp_dns(entry_name)` 在**每次拨号成功后**把 PPP 接口 IPv4 DNS 置 none（`netsh interface ipv4 set dnsservers name=<entry> source=static address=none`），DNS 交给物理口；随后用 `getaddrinfo` 复核，解析不可用则立刻回退 `source=dhcp`（绝不把 DNS 清没）。日志：`PPP interface 'gdut' DNS detached (physical NIC serves DNS; AAAA ok)`。
+- 排查手法：`Get-NetConnectionProfile` 看 `IPv6Connectivity`；`netsh interface ipv6 show route` 看 `::/0`；**绑定 PPP 源地址（10.30.194.204）的原生 UDP 查询**（PowerShell `UdpClient` 绑该源地址）区分"服务器不答"与"客户端隐藏"；`pktmon filter add dns -p 53` + `pktmon start --capture --pkt-size 0` + `pktmon etl2pcap`（产物是 pcapng，不是 pcap）看客户端到底发没发。
+- 反例备忘：Mihomo TUN 下 `ping -6 2001:da8:ffff::dead:beef`（不存在的地址）也 0% 丢包 ~1ms —— 该路径 ICMP 由本地 TUN 合成，**ping 通不代表 v6 可用**。
 
 ### 探针 / 配置
 - `http_probe_url` 仅接受 `http://` + IPv4 字面量（`probe::parse_http_probe_target` 单一实现复用）；`9.9.9.9` 被校园网墙，默认 `223.5.5.5`；gateway `0.0.0.0` 时 ICMP 目标退化为 `223.5.5.5`。
@@ -166,6 +174,18 @@ setup 文件尾部追加 `[files][TOC][footer]` 的自定义容器：footer 24B�
 - **拨 TUN 开关必重启 opencode/长连接进程**（TCP 无迁移，SSE 静默死亡）；判新老连接用 `curl ai.lma.moe/v1/models`（401 = 新连接活）。
 - Tailscale 家↔校不能直连（校园 CGNAT = 对称 NAT + 端口重写 + 多 ISP 池；家路由器按远端过滤）；修复在家侧：开 UPnP 或转发 UDP 41641→192.168.5.11；全案 `docs/tailscale-p2p.md`。
 
+### Verge 2.5.5 增强配置挂载机制（2026-09-23 拉源码核对）
+- `enhance/merge.rs::use_merge` 只做 deep_merge（`prepend-rules` 之类不会被识别，写进 Merge.yaml 就是死键——CONTEXT 旧说法在 2.5.5 仍成立）。
+- 规则/代理/组/合并/脚本五类增强项是**按订阅条目挂载**的：`profiles.yaml` → `items[].option.{merge,script,rules,proxies,groups}` = 对应 uid；默认 uid 是 `Merge`/`Script`/`Rules`/`Proxies`/`Groups`（找不到就是空实现，静默不生效）。
+- 所以"编辑规则"= 改该订阅 `option.rules` 指向的那个文件（`profiles/<uid>.yaml`）里的 `prepend`/`append`/`delete`（结构见 `enhance/seq.rs::use_seq`：prepend 拼在订阅规则前）。**光往 `profiles/*.yaml` 里写不改 `option.rules` 不会生效**；改完要完整退出并重启 Verge 进程。
+- `tun.*` 的 GUI 键（MTU/route-exclude 等）另由 `enhance/tun.rs::enforce_tun` 在最后覆盖，仍以 GUI 为准。
+
+### 微信卡顿 = CN v6 路由错配（2026-09-23 实测）
+- 现象：微信（`Weixin`/`WeChatAppEx`）连接源地址是 TUN 的 `fdfe:dcba:9876::1`，目标是腾讯 v6 `2402:4e00:a2:f0::9:443`。
+- 实测三条路径：直连腾讯 v6 = 3/3 超时（ICMP 100% 丢，校园 v6 到不了该段）；走节点 = 200 但 TLS 82ms/TTFB 169ms；CN 直连基准（百度 v6/v4）= TLS 30ms / TTFB 41ms。即"兜底 MATCH,Final 把不可达的 CN v6 丢给节点"，微信因此长轮询全程 169ms。
+- 处置（最终）：**不要用 REJECT**——浏览器收到 RST 直接报“意外终止了连接”（实测 `mp.weixin.qq.com`），不会优雅回落 v4。
+- 最终方案：Merge.yaml → `dns.nameserver-policy` 把腾讯/微信域名指向校园 DNS `10.1.3.38`（实测它对 AAAA 返回空）→ 应用层只拿到 A，自然走 v4（v4 命中 GEOIP,CN → DIRECT，20-40ms）；教育网段在订阅 `option.rules`（`rkSjO3zIps3Q.yaml`）里保持 DIRECT。
+- 判据备忘：`curl -6 --resolve <域名>:443:[<v6>]` 看 TLS/TTFB 区分"直连 / 走节点 / 不通"（CN 直连 ~30ms TLS，走节点 ~80ms TLS）；`Get-NetTCPConnection -OwningProcess <verge-mihomo>` 看 mihomo 出站到底连的是目标 IP（DIRECT）还是固定境外 IP（代理）。
 ### NCSI 网络徽标与热点反制（2026-09-16 实测）
 - 物理以太网永远显示"无法访问 Internet"（`Get-NetConnectionProfile` → `LocalNetwork`）是双出口拓扑的**真实判定**，不是故障：校园有线 L3 需 PPPoE，物理口直连只有内网。Win11 的 NCSI 由 `netprofm`（Network List Service）承载；"到 Internet 的下一跳"是**全系统选举**，PPP 会话（有效 metric 26）一上线就夺走它。
 - `NlaSvc\Parameters\Internet` 的 `ActiveWebProbeHost` 指到本机 + 本机 80 应答 `Microsoft Connect Test`，以太网确能拿到 `ActiveHttpProbeSucceeded`，但 **1–7 秒内必被 `NoRoute` 降回 LocalNetwork**；此后探测持续成功（20s 一次 ×5）也无法恢复。故不伪造徽标（ADR-0008）。NCSI 探测报文特征：`GET /connecttest.txt HTTP/1.1`、`User-Agent: Microsoft NCSI`、`Cache-Control: no-cache`、`Pragma: no-cache`。
