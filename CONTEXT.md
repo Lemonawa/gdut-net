@@ -180,6 +180,14 @@ setup 文件尾部追加 `[files][TOC][footer]` 的自定义容器：footer 24B�
 - 所以"编辑规则"= 改该订阅 `option.rules` 指向的那个文件（`profiles/<uid>.yaml`）里的 `prepend`/`append`/`delete`（结构见 `enhance/seq.rs::use_seq`：prepend 拼在订阅规则前）。**光往 `profiles/*.yaml` 里写不改 `option.rules` 不会生效**；改完要完整退出并重启 Verge 进程。
 - `tun.*` 的 GUI 键（MTU/route-exclude 等）另由 `enhance/tun.rs::enforce_tun` 在最后覆盖，仍以 GUI 为准。
 
+### 校内域名必须走校园 DNS（2026-09-23 实测）
+- 现象：镜像站 `mirrors.gdut.edu.cn` 右侧「域名选择」组件一直探测失败/空白。
+- 根因：`mirrors4/6.gdut.edu.cn` 与 `mirrors.gdut.edu.cn` 的 AAAA 是**校园 DNS 独有记录**，
+  TUN 的 DNS 劫持把它们送给公网上游（AliDNS/udns）→ NXDOMAIN。
+- 修法：`Merge.yaml` → `dns.nameserver-policy` 加 `'+.gdut.edu.cn': ['10.1.3.38']`；
+  10.1.3.38 落在 GUI route-exclude 的 `10/8` 内，mihomo 直连可达。回退：删掉该行重启 Verge。
+- 修完效果：三域名解析正常，镜像走原生 v6 `2001:da8:2018:f666::6666`（`curl -6` 200 / 18ms）。
+
 ### 微信卡顿 = CN v6 路由错配（2026-09-23 实测）
 - 现象：微信（`Weixin`/`WeChatAppEx`）连接源地址是 TUN 的 `fdfe:dcba:9876::1`，目标是腾讯 v6 `2402:4e00:a2:f0::9:443`。
 - 实测三条路径：直连腾讯 v6 = 3/3 超时（ICMP 100% 丢，校园 v6 到不了该段）；走节点 = 200 但 TLS 82ms/TTFB 169ms；CN 直连基准（百度 v6/v4）= TLS 30ms / TTFB 41ms。即"兜底 MATCH,Final 把不可达的 CN v6 丢给节点"，微信因此长轮询全程 169ms。
