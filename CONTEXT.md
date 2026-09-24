@@ -171,8 +171,8 @@ setup 文件尾部追加 `[files][TOC][footer]` 的自定义容器：footer 24B�
 - Verge 改 `Merge.yaml` 必须**完整退出并重启 Verge 进程**才重新合并；TUN GUI 弹窗保存则热生效（2.5.4 实测）。TUN 状态看 `Get-NetAdapter Mihomo` + `0.0.0.0/0` 路由在不在。
 - Google 类站点在 Chrome 里可能拿到 `alt-svc: h3` 后尝试 QUIC；2026-09-20 本机 TUN MTU=1480 时 TCP/H2 已恢复且 Google ≈0.5s，但 `curl --http3-only` 对 Google 仍超时（H3 握手能到 2.3s，后续无响应）。若浏览器偶发局部卡住，先在 `chrome://flags/#enable-quic` 禁用 QUIC，不要把 TCP 恢复误判成 MTU 未生效。
 - fake-ip 已退役为 redir-host（频繁重启内核 + 系统 DNS 缓存下，旧映射进缓存即 RST）；国外慢先换节点再怪内核（固定 5.1s×N 次 = 节点晚高峰）。
-- **拨 TUN 开关必重启 opencode/长连接进程**（TCP 无迁移，SSE 静默死亡）；判新老连接用 `curl ai.lma.moe/v1/models`（401 = 新连接活）。
-- Tailscale 家↔校不能直连（校园 CGNAT = 对称 NAT + 端口重写 + 多 ISP 池；家路由器按远端过滤）；修复在家侧：开 UPnP 或转发 UDP 41641→192.168.5.11；全案 `docs/tailscale-p2p.md`。
+- **拨 TUN 开关必重启 opencode/长连接进程**（TCP 无迁移，SSE 静默死亡）；判新老连接用 `curl ai.lma.moe/v1/models`（401 = 新连接活）。 微信同样受影响：TUN 重建后它会静默 stall，直到自身超时重连才把积压消息一次性补齐（2026-09-23 实测"喷水"），
+  TUN 动过之后重启微信可立即恢复；判断标准是同机 curl/其他短连接一切正常而它"什么都出不来"。- Tailscale 家↔校不能直连（校园 CGNAT = 对称 NAT + 端口重写 + 多 ISP 池；家路由器按远端过滤）；修复在家侧：开 UPnP 或转发 UDP 41641→192.168.5.11；全案 `docs/tailscale-p2p.md`。
 
 ### Verge 2.5.5 增强配置挂载机制（2026-09-23 拉源码核对）
 - `enhance/merge.rs::use_merge` 只做 deep_merge（`prepend-rules` 之类不会被识别，写进 Merge.yaml 就是死键——CONTEXT 旧说法在 2.5.5 仍成立）。
