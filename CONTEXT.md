@@ -180,6 +180,17 @@ setup 文件尾部追加 `[files][TOC][footer]` 的自定义容器：footer 24B�
 - 所以"编辑规则"= 改该订阅 `option.rules` 指向的那个文件（`profiles/<uid>.yaml`）里的 `prepend`/`append`/`delete`（结构见 `enhance/seq.rs::use_seq`：prepend 拼在订阅规则前）。**光往 `profiles/*.yaml` 里写不改 `option.rules` 不会生效**；改完要完整退出并重启 Verge 进程。
 - `tun.*` 的 GUI 键（MTU/route-exclude 等）另由 `enhance/tun.rs::enforce_tun` 在最后覆盖，仍以 GUI 为准。
 
+### 校园 v6 到电信 v6 段不可达（2026-09-24 mihomo 日志实证）
+- 现象：微信"长时间收取中"/表情图加载不出/点刷新才出图；关掉 TUN 就正常。
+- 根因：我加的 `IP-CIDR6,240e::/16,DIRECT` 把微信大量使用的**电信 v6（240e:978/e1/e9…）**强制直连，
+  而校园 v6 到该段**不通**——mihomo 日志 120 秒内 114 条 `dial DIRECT ... i/o timeout`。
+- 对照：`2402:4e00::/32`（腾讯）、`2408::/16`（联通，mmbiz.qpic.cn 所在）、`240c::/16`（CERNET）、教育网段
+  校园 v6 **可达**（日志里同样走 DIRECT 都成功）。
+- 处置：CN v6 分两类——可达段 DIRECT；`240e::/16` 与未验证的 `2409::/16` 走代理组（`Final`）。修后同类流量
+  全部 `using Final[...]`，警告归零。
+- 排查手法：控制器 `/logs`（WebSocket，`?level=info&token=<secret>`）能看到每条连接的 `进程 --> 目标 match 规则 using 链路`
+  以及 dial 失败原因；`/connections` 两次快照做差可看哪条流卡住。控制器需在 Verge 设置里开启（默认关）。
+
 ### 浏览器侧 `ERR_CONNECTION_CLOSED`（2026-09-23 实测）
 - 症状：微信/公众号页在 Chrome 报 `ERR_CONNECTION_CLOSED`，而 `curl` v4/经代理均 200、独立 Chromium 也能开。
 - 排查路径（系统层先自证清白）：`Resolve-DnsName` 看该域名 AAAA 是否为空 → `curl -4/-6/经代理` 三通路 → 开一个
