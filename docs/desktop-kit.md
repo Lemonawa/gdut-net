@@ -12,8 +12,8 @@
 |---|---|
 | GDUT Net | 打开中文日常界面（左键托盘图标同效） |
 | 状态查看 | 命令行看一次状态（`status.bat`）；`Connected` + IP 即在线 |
-| 回校模式（管理员） | 服务设自动+启动，等拨号成功 + 30s 稳定检查；成功后经 explorer 去提权拉起托盘（回家模式会退出它）；失败自动停服务并提示 |
-| 回家模式（管理员） | 停服务+设手动+退托盘，防无效重拨与 toast；不碰代理；回校模式会自动把托盘叫回来 |
+| 回校模式（管理员） | 服务设自动+启动，等拨号成功 + 30s 稳定检查；成功后写回托盘自启（HKCU Run）、经 explorer 去提权拉起托盘、并恢复 Clash 校园 DNS 策略（需重启 Verge 生效）；失败自动停服务并提示 |
+| 回家模式（管理员） | 停服务+设手动+退托盘+**摘 HKCU Run 自启**（否则回家重启后托盘又自启）+**停用 Clash 校园 DNS 策略**（家里不可达、每次查询白等 5s；需重启 Verge 生效）；不碰系统代理；回校模式全部恢复 |
 | 启动托盘 | 托盘被杀后重新拉起 |
 | 无线体检（管理员） | 一次性校园 WiFi 认证实测（`wireless test`，约 40s，自断开不留状态） |
 | 打开日志 | 打开 `C:\ProgramData\gdut-net\logs\` |
@@ -31,7 +31,7 @@
 |---|---|
 | `gdut-net.exe` | 主程序（服务 + 托盘/日常 GUI + CLI），portable 本体 |
 | `gdut-net-setup.exe` | 安装器副本（修复/卸载/改密入口；即发布物） |
-| `status.bat` / `campus.bat` / `home.bat` / `tray.bat` / `wireless-test.bat` / `open-logs.bat` / `proxy-check.bat` | 产品脚本（payload，纯英文、`%~dp0` 位置无关） |
+| `status.bat` / `campus.bat` / `home.bat` / `tray.bat` / `wireless-test.bat` / `open-logs.bat` / `proxy-check.bat` / `clash-campus-dns.ps1` | 产品脚本（payload，纯英文、`%~dp0` 位置无关）；`clash-campus-dns.ps1 on\|off` 由回家/回校模式调用，切换 Merge.yaml 里的校园 DNS 策略块 |
 | `说明.txt` | 中文速查（装机自带） |
 | `switch-v4.ps1` | **个人**：gdut-net ↔ Dr.COM 完整切换（全自动+失败自回滚）；日志写 `C:\ProgramData\gdut-net\logs\switch-v4.log` |
 | `rollback.bat` / `rollback-v4.ps1` | **个人**：一键换回旧版 gdut-net（不是 Dr.COM）+ 重起服务；switch 失败后的第二道防线 |
@@ -44,7 +44,7 @@
 ## 日常场景
 
 - **在校开机**：服务自启拨号，托盘自启（`HKCU\...\Run\gdut-net-tray` 指向安装目录）。开始菜单"状态查看"确认 `Connected`。
-- **离校回家**：开始菜单"回家模式"（管理员）。回家后普通网络即用，gdut-net 静默（托盘图标一并退出，回校时自动回来）。
+- **离校回家**：开始菜单"回家模式"（管理员）。回家后普通网络即用，gdut-net 静默（托盘退出且自启被摘，回家重启不会再冒出来；回校时自动恢复）。
 - **返校**：插上网线，开始菜单"回校模式"（管理员）。成功后托盘/日常窗口自动回来；失败会停服务并提示下一步。
 - **拔线改无线**：服务自动接管（默认"有线优先自动接管"）；日常界面可切"有线+无线备用"常备无缝。拔线期间程序不会拨号（link gate 防端口卡死），插回网线 1~2 秒自动拨上。
 - **改账号密码 / 修复安装**：打开"GDUT Net" → 修改账号密码；或直接重跑 `gdut-net-setup.exe`（维护页，默认保留现有密码，也可换新）；或开始菜单安装器。
@@ -71,6 +71,7 @@
 4. Clash Verge Rev ≥2.5.4：TUN MTU 与“排除自定义网段”在“系统设置 → 虚拟网卡模式 → 齿轮”弹窗维护，GUI 值优先于 `Merge.yaml`；保存热生效，勿点“恢复默认”。2026-09-20 DF ping 实测路径 MTU=1480，当前使用 1480（1481 即需分片）。排除段：`127/8`、`169.254/16`、`172.16/12`、`192.168/16`、`10/8`、`113.75.184.0/20`、Parsec STUN 三个 /32。
 5. Verge 仍可用 `profiles/Merge.yaml` 注入 DNS 等 GUI 未管理字段，别手改生成的 `clash-verge.yaml`；改 Merge 后完整退出并重启 Verge。
 6. WSL 是 mirror 模式跟主机路由；直连走 TUN 即可（fake-ip 已退役为 redir-host）。
+8. **校园 DNS 策略随地点切换**：`Merge.yaml` 里 `# CAMPUS-DNS-BEGIN/END` 包着的 `dns.nameserver-policy`（腾讯域名→10.1.3.38、`+.gdut.edu.cn`→校内解析器）只在校内有效。mihomo 的 policy 列表**串行查询**，家里那台 10.1.3.38 不可达 → 每次查询先卡 ~5s（2026-09-25 实测）。回家/回校模式会调 `clash-campus-dns.ps1 off|on`（给块内行加/去 `#OFF#` 前缀），但 **Verge 只在完整重启时重新合并**——切换后自己重启一次 Verge，或记着下次重启生效。
 7. Google 会长期通告 QUIC Alt-Svc；本机 2026-09-20 实测 MTU=1480 后 TCP/H2 正常但 Google H3 仍超时。浏览器局部卡住先禁 `chrome://flags/#enable-quic`，同时用本地 mixed port 对照区分节点与 TUN 故障。
 
 ## 校园网反制（2026-09-16 实测）

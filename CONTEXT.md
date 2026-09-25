@@ -158,6 +158,7 @@ setup 文件尾部追加 `[files][TOC][footer]` 的自定义容器：footer 24B�
 - `UAC ConsentPromptBehaviorAdmin=0 + EnableLUA=1` 下的 RunAs 行为（2026-09-11 修正）：**可能自动提权成功，也可能失败，取决于策略**——2026-09-11 实测 `ShellExecuteExW "runas"`（setup 自提权）在本机直接成功、无提示；旧记录"RunAs 静默失败"不再是当前行为。免 UAC 的**预授权通道**仍是计划任务 `gdut-switch`（实测身份：`Lemonawa`/交互式/最高权限——所以不弹 UAC；`AllowStartIfOnBatteries`，10min 超时），触发 `schtasks /Run /TN gdut-switch`。**任务窗口可见**：中途关掉窗口 = Ctrl+C 杀掉脚本（退出码 `0xC000013A`）——换装和拨号通常已完成，但最后 75s 稳定性检查与 `SUCCESS` 日志会缺失（无实质影响）。要隐藏窗口/改任务指向，别用 `schtasks /TR` 拼引号（`\"` 不是 PowerShell 转义，R8 实测 ParserError）：管理员用 `Set-ScheduledTask -TaskName gdut-switch -Action (New-ScheduledTaskAction -Execute 'powershell.exe' -Argument '-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File "C:\Program Files\gdut-net\switch-v4.ps1"')`，再用 `schtasks /Query /TN gdut-switch /V /FO LIST` 核对。
 - 部署形态（2026-09-11）：产品安装到 `C:\Program Files\gdut-net\`（服务路径、HKCU Run 托盘自启、计划任务 `gdut-switch` 全指向这里），开始菜单 `GDUT Net` 10 项 + 应用和功能条目就位；dial + 75s 稳定性验证通过。桌面工具包（`C:\Users\Lemonawa\Desktop\gdut-net\`）保留作 fallback，不再日常使用。
 - 个人运维脚本（`switch-v4.ps1`、`rollback.bat`、`rollback-v4.ps1`、`一键切换.bat`、`tun-watch.ps1`）与产品脚本同居安装目录；公开发布 payload 不含它们。
+- 回家模式必须同时摘掉托盘自启 `HKCU\...\Run\gdut-net-tray`（只杀进程的话，回家重启后托盘又自己起来），回校模式写回；值格式与 `tray::register_autostart` 一致（带引号 exe 路径 + ` tray`），由 `tests/payload_inventory.rs` 冻结。
 - 提权脚本要拉起用户态 GUI（托盘/日常窗口）必须经 `explorer.exe` 去提权（`setup::ui::open_tray` 与 `packaging/payload/campus.bat` 同法）：直接从提权进程 spawn 会把托盘提权启动，违背"托盘 = 普通用户会话进程"设计。
 - `switch-v4.ps1` 不再内嵌明文密码：安装改走 `gdut-net-setup.exe --silent --keep-password`（复用已存 DPAPI 密文重新 `set_credentials`）。
 - `pw.txt` 用后即删；明文密码不落盘。
@@ -213,6 +214,9 @@ setup 文件尾部追加 `[files][TOC][footer]` 的自定义容器：footer 24B�
   udns `42.194.232.31` 的**明文**查询也能解出 `mirrors4/6.gdut.edu.cn` —— 早先"校内记录只有校园 DNS 有"**不成立**；
   当时症状更像 mihomo 的 DoT/DoH 解析链路或其 DNS 缓存问题（重启 + 策略后恢复）。
   保留该条策略的理由改为"显式归属"：校内域名固定用校内解析器，不依赖公网解析器对校内记录的态度。
+- **在家实测（2026-09-25 晚）**：mihomo `nameserver-policy` 的多服务器是**串行**查询——列表里只要有一台不可达，整条查询就卡满 ~5s 才 fallback（raw UDP 直查 `127.0.0.1:1053`：`www.qq.com` 5.0s、部分返回 SERVFAIL；`['10.1.3.38','223.5.5.5']` 同样 5s，不会因第二台可达而变快）。故回家必须整段停用校园 DNS 策略：`home.bat`/`campus.bat` 调 payload `clash-campus-dns.ps1 off|on`，按 `# CAMPUS-DNS-BEGIN/END` 标记给块内代码行加/去 `#OFF#` 前缀（幂等，块内既有注释不动）。
+- **生效必须完整重启 Verge**：运行内核的配置在 `C:\ProgramData\clash-verge-service\`（SYSTEM 专属，普通用户读写均被拒），appdata 里的 `clash-verge.yaml` 只是 sidecar/陈旧副本；控制器管道 `\\.\pipe\verge-mihomo-production-<hash>` 可用但 `GET /configs` 只返回 general 段（无 dns），**不能**用 payload 热重载（会丢 DNS 段）。
+- **WinPS 5.1 改 UTF-8 无 BOM 的 YAML 千万别用 `Get-Content`**：默认按 ANSI(GBK) 解码，中文注释变乱码且会吞行（2026-09-25 实测把 Merge.yaml 整成 79 行乱码副本）。必须 `[IO.File]::ReadAllBytes` + `Text.Encoding::UTF8` 读写，并保留 BOM/换行风格。
 - 测速对照（每台 360 查询，A+AAAA×9 域名×10 轮×2 并发）：明文 UDP 七台都 0–1ms（校内 4 台 / AliDNS / DNSPod / udns）；
   实际加密链路 AliDNS DoT:853 ≈6ms、udns DoT:850 ≈8ms（p99 13/91ms）——差距主要是 TLS 开销。
   被墙域名的 A 各家返回**不同**的污染 IP（google: 185.45.x/157.240.x/69.171.x…），都不可信。
