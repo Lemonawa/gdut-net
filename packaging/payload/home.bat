@@ -1,6 +1,7 @@
 @echo off
 rem Home mode: campus PPPoE does not exist at home, so stop gdut-net
 rem (avoids endless redial + toast spam) and set the service to Manual.
+rem The tray process is stopped too; campus mode brings it back.
 rem Proxy is left untouched (you may need Clash at home).
 rem Run as Administrator. Self-contained rollback at the bottom.
 
@@ -18,6 +19,7 @@ taskkill /F /IM gdut-net.exe >nul 2>&1
 sc query gdut-net | findstr /C:"STOPPED" >nul
 if errorlevel 1 goto :rollback
 echo HOME MODE OK: service stopped and set to Manual.
+echo Tray icon was stopped too (campus mode restores it).
 echo At home your normal network works, gdut-net stays quiet.
 pause
 exit /b 0

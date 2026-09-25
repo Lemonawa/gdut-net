@@ -1,6 +1,7 @@
 @echo off
 rem Campus mode: set the gdut-net service to Automatic, start it, wait for
-rem dial success (max 180s), then run a 30s stability check.
+rem dial success (max 180s), run a 30s stability check, then bring the tray
+rem back (home mode exits it).
 rem Run as Administrator. Self-contained rollback at the bottom.
 
 net session >nul 2>&1
@@ -27,6 +28,10 @@ timeout /t 30 /nobreak >nul
 powershell -NoProfile -Command "Get-Content 'C:\ProgramData\gdut-net\logs\gdut-net_rCURRENT.log' -Tail 10 -Encoding UTF8 | Select-String 'considered dropped|Probe failed'" | findstr "dropped failed" >nul
 if not errorlevel 1 goto :rollback
 echo CAMPUS MODE OK:
+rem Home mode exits the tray; bring it back. explorer de-elevates (this script
+rem is elevated) so the tray stays a normal-user session process, not admin.
+rem No-arg start = tray + daily window; an existing tray just wakes its window.
+start "" explorer.exe "%~dp0gdut-net.exe"
 "%~dp0gdut-net.exe" status
 pause
 exit /b 0

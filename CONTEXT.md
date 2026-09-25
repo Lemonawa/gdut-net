@@ -158,6 +158,7 @@ setup 文件尾部追加 `[files][TOC][footer]` 的自定义容器：footer 24B�
 - `UAC ConsentPromptBehaviorAdmin=0 + EnableLUA=1` 下的 RunAs 行为（2026-09-11 修正）：**可能自动提权成功，也可能失败，取决于策略**——2026-09-11 实测 `ShellExecuteExW "runas"`（setup 自提权）在本机直接成功、无提示；旧记录"RunAs 静默失败"不再是当前行为。免 UAC 的**预授权通道**仍是计划任务 `gdut-switch`（实测身份：`Lemonawa`/交互式/最高权限——所以不弹 UAC；`AllowStartIfOnBatteries`，10min 超时），触发 `schtasks /Run /TN gdut-switch`。**任务窗口可见**：中途关掉窗口 = Ctrl+C 杀掉脚本（退出码 `0xC000013A`）——换装和拨号通常已完成，但最后 75s 稳定性检查与 `SUCCESS` 日志会缺失（无实质影响）。要隐藏窗口/改任务指向，别用 `schtasks /TR` 拼引号（`\"` 不是 PowerShell 转义，R8 实测 ParserError）：管理员用 `Set-ScheduledTask -TaskName gdut-switch -Action (New-ScheduledTaskAction -Execute 'powershell.exe' -Argument '-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File "C:\Program Files\gdut-net\switch-v4.ps1"')`，再用 `schtasks /Query /TN gdut-switch /V /FO LIST` 核对。
 - 部署形态（2026-09-11）：产品安装到 `C:\Program Files\gdut-net\`（服务路径、HKCU Run 托盘自启、计划任务 `gdut-switch` 全指向这里），开始菜单 `GDUT Net` 10 项 + 应用和功能条目就位；dial + 75s 稳定性验证通过。桌面工具包（`C:\Users\Lemonawa\Desktop\gdut-net\`）保留作 fallback，不再日常使用。
 - 个人运维脚本（`switch-v4.ps1`、`rollback.bat`、`rollback-v4.ps1`、`一键切换.bat`、`tun-watch.ps1`）与产品脚本同居安装目录；公开发布 payload 不含它们。
+- 提权脚本要拉起用户态 GUI（托盘/日常窗口）必须经 `explorer.exe` 去提权（`setup::ui::open_tray` 与 `packaging/payload/campus.bat` 同法）：直接从提权进程 spawn 会把托盘提权启动，违背"托盘 = 普通用户会话进程"设计。
 - `switch-v4.ps1` 不再内嵌明文密码：安装改走 `gdut-net-setup.exe --silent --keep-password`（复用已存 DPAPI 密文重新 `set_credentials`）。
 - `pw.txt` 用后即删；明文密码不落盘。
 

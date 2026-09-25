@@ -65,3 +65,18 @@ fn bats_use_script_relative_paths() {
         );
     }
 }
+
+/// 提权脚本（campus.bat）拉起托盘必须经 explorer 去提权：直接 start 会把托盘
+/// 以管理员身份常驻，违背"托盘 = 普通用户会话进程"设计（CONTEXT 工程陷阱）。
+#[test]
+fn campus_bat_de_elevates_tray_launch() {
+    let text = fs::read_to_string(payload_dir().join("campus.bat")).unwrap();
+    assert!(
+        text.contains("explorer.exe"),
+        "campus.bat must relaunch the tray via explorer (de-elevated)"
+    );
+    assert!(
+        !text.contains("\"%~dp0gdut-net.exe\" tray"),
+        "campus.bat must not start the tray directly (it runs elevated)"
+    );
+}

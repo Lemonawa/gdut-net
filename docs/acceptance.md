@@ -121,6 +121,18 @@ reg query "HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\gdut-net"
 | 物理拔线 → 无线接管 | 2s 发现；期间无任何 Dial（link gate）；≈14s portal Online |
 | 插回网线 → 恢复与让位 | `Ethernet link restored, redialing immediately` → 1.8s `Dial succeeded` → metric 还原 → WLAN 让位断开 |
 
+## 回家/回校一键切换真机走查（2026-09-25，安装形态）
+
+前置：校园网在线（`gdut` 拨号 10.30.194.204、服务 Running/Automatic）；开始菜单"回家模式"/"回校模式"逐项打开（管理员项由 Shell 弹 UAC）。
+
+| 项 | 结果 |
+|---|---|
+| 回家模式 | exit 0 + `HOME MODE OK`；SCM 事件 7040 `自动→按需`（12:49:43）；服务日志 `Stop signal received, hanging up and exiting`；PPP `gdut` 摘除；停机 65s 内服务日志零新增（无无效重拨）。托盘进程按设计一并退出 |
+| 回校模式 | SCM 事件 7040 `按需→自动`（12:50:46）；服务启动 → `Dial succeeded` 2.0s（12:50:48）；30s 稳定检查窗口内无 `considered dropped`/`Probe failed`；`status` = Connected、Redial 0 |
+| 托盘接力（修复后复测） | 回家退出托盘 → 回校成功路径 `start "" explorer.exe "%~dp0gdut-net.exe"` 经 explorer 去提权拉起：新托盘完整性级别 **Medium**（非管理员）、`gdut-net-tray-singleton` mutex 与 `gdut-net-tray-show` 事件均 `ERROR_ALREADY_EXISTS`；复测全程服务会话未断（uptime 连续、Redial 0、IP 不变） |
+
+复测方法（不碰服务）：`Stop-Process` 杀掉 session 1 的托盘 → 以管理员上下文执行 campus.bat 新增行 → 校验上述三项；WM_CLOSE 收起弹出的日常窗口（关窗 = 隐藏，托盘进程仍在）。
+
 ## 深挖两波遗留事项（deferred minors，2026-09-12）
 
 > 来源：两波深挖（机械波 + 结构波）逐任务评审；完整上下文在本地归档
