@@ -99,7 +99,13 @@ pub fn has_console() -> bool {
 /// 双击 exe（无参数、无控制台）入口：已安装 → 托盘 + 弹 GUI；未安装 → 中文提示。
 pub fn double_click_entry() -> Result<()> {
     match crate::service::install_state() {
-        crate::service::InstallState::Installed { .. } => run_tray(true),
+        crate::service::InstallState::Installed { .. } => {
+            if crate::service::home_mode_standby() == Some(true) {
+                message_box_home_mode_hint();
+                return Ok(());
+            }
+            run_tray(true)
+        }
         // 查询失败（Unknown）走与未安装相同的提示：查不到服务时给安装提示
         // 无害（重装幂等），误判"已安装"去起托盘则更糟（服务不在，托盘只能空等）。
         crate::service::InstallState::NotInstalled | crate::service::InstallState::Unknown => {
@@ -115,6 +121,24 @@ fn message_box_install_hint() {
 
     let text =
         wide("gdut-net 尚未安装。\n\n请运行安装包 gdut-net-setup.exe，或从开始菜单打开安装程序。");
+    let title = wide("GDUT Net");
+    unsafe {
+        MessageBoxW(
+            None,
+            PCWSTR(text.as_ptr()),
+            PCWSTR(title.as_ptr()),
+            MB_OK | MB_ICONINFORMATION,
+        );
+    }
+}
+
+/// 回家模式下双击入口的中文提示（GUI 场景用户可见，不受"控制台英文"约束）。
+fn message_box_home_mode_hint() {
+    use windows::Win32::UI::WindowsAndMessaging::{MessageBoxW, MB_ICONINFORMATION, MB_OK};
+
+    let text = wide(
+        "当前是回家模式：gdut-net 服务已停用，托盘不会常驻。\n\n回校后从开始菜单点\"回校模式\"，服务与托盘都会恢复。",
+    );
     let title = wide("GDUT Net");
     unsafe {
         MessageBoxW(
@@ -262,6 +286,13 @@ pub fn run_tray(show_gui_at_start: bool) -> Result<()> {
     // 先装文件日志（托盘无 stderr），单实例守卫的 warn 也得有落点；
     // 句柄活到进程退出（泵循环内不 drop），Secondary 分支安装后即退出，无害。
     let _logger = crate::logging::init_tray_logging(crate::paths::LOGS_DIR, "tray");
+    // 回家模式守卫：回家模式把服务设成"按需"并停掉，但 Windows 可能在下次登录把
+    // 托盘重新拉起来（2026-09-26 实测，见 home_mode 模块注释）——这里自己退出，
+    // 静默、不留图标、不弹 toast。
+    if crate::service::home_mode_standby() == Some(true) {
+        log::info!("Home mode (service on-demand & stopped): tray exits");
+        return Ok(());
+    }
     let _singleton = match acquire_singleton() {
         Singleton::Primary(h) => h,
         Singleton::Secondary => {

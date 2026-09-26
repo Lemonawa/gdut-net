@@ -374,6 +374,30 @@ mod win {
         }
     }
 
+    /// 回家模式守卫（托盘启动时问一次）：服务被设成"按需/禁用"且没在跑。
+    ///
+    /// `None` = SCM 查询失败；调用方按"不退出"处理（宁可留着托盘，也别把
+    /// 正常状态误判成回家模式）。
+    pub fn home_mode_standby() -> Option<bool> {
+        let mgr =
+            ServiceManager::local_computer(None::<&str>, ServiceManagerAccess::CONNECT).ok()?;
+        let svc = mgr
+            .open_service(
+                SERVICE_NAME,
+                ServiceAccess::QUERY_STATUS | ServiceAccess::QUERY_CONFIG,
+            )
+            .ok()?;
+        let running = svc
+            .query_status()
+            .map(|s| matches!(s.current_state, ServiceState::Running))
+            .unwrap_or(false);
+        let start_type = svc
+            .query_config()
+            .map(|c| c.start_type.to_raw())
+            .unwrap_or(crate::home_mode::START_AUTO);
+        Some(crate::home_mode::tray_should_exit(start_type, running))
+    }
+
     /// 服务是否已安装（三态：SCM 不可达/查询失败不再冒充"未安装"）。
     /// `service_exe: None` = 服务存在但配置读取失败、路径未知（存在但未知）。
     pub fn install_state() -> InstallState {
@@ -859,12 +883,12 @@ mod win {
 
 #[cfg(windows)]
 pub use win::{
-    capture_prev_service, delete_service, existing_account, install, install_core, install_state,
-    install_with_rollback, restore_service_path, rollback_install, rollback_line_en, service_main,
-    start_service, stop_service, uninstall, uninstall_core, Credential, InstallFailure,
-    InstallOutcome, InstallRequest, InstallState, PrevService, PurgeStep, RollbackOutcome, Step,
-    UninstallReport, STEP_UNINSTALL_AUTOSTART, STEP_UNINSTALL_ENTROPY, STEP_UNINSTALL_EVENT_SOURCE,
-    STEP_UNINSTALL_SERVICE,
+    capture_prev_service, delete_service, existing_account, home_mode_standby, install,
+    install_core, install_state, install_with_rollback, restore_service_path, rollback_install,
+    rollback_line_en, service_main, start_service, stop_service, uninstall, uninstall_core,
+    Credential, InstallFailure, InstallOutcome, InstallRequest, InstallState, PrevService,
+    PurgeStep, RollbackOutcome, Step, UninstallReport, STEP_UNINSTALL_AUTOSTART,
+    STEP_UNINSTALL_ENTROPY, STEP_UNINSTALL_EVENT_SOURCE, STEP_UNINSTALL_SERVICE,
 };
 
 #[cfg(windows)]

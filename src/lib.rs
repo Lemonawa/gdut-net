@@ -8,6 +8,7 @@ pub mod eventlog;
 #[cfg(windows)]
 pub mod fonts;
 pub mod heartbeat;
+pub mod home_mode;
 pub mod http;
 pub mod ipc;
 pub mod logging;
