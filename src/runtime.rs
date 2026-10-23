@@ -230,6 +230,7 @@ mod win {
         stop: CancellationToken,
         ev_tx: mpsc::Sender<Event>,
         egress: WirelessEgress<RouteGuard>,
+        egress_error: Option<String>,
     }
 
     impl WirelessWorker {
@@ -256,11 +257,29 @@ mod win {
                 stop,
                 ev_tx,
                 egress: WirelessEgress::new(RouteGuard::new()),
+                egress_error: None,
             })
         }
 
         async fn run(mut self, mut lane_rx: mpsc::Receiver<LaneMsg>) {
-            while let Some(msg) = lane_rx.recv().await {
+            loop {
+                // After release the WLAN can disappear and stop producing lane
+                // messages. Pending rollback must still retry while idle.
+                let msg = tokio::select! {
+                    msg = lane_rx.recv() => match msg {
+                        Some(msg) => msg,
+                        None => break,
+                    },
+                    _ = sleep(Duration::from_secs(2)), if self.egress.has_pending_cleanup() => {
+                        if let Err(e) = self.egress.retry_cleanup() {
+                            log::warn!("Wireless Egress pending cleanup failed (kept for retry): {e:#}");
+                        }
+                        continue;
+                    }
+                };
+                if let Err(e) = self.egress.retry_cleanup() {
+                    log::warn!("Wireless Egress pending cleanup failed (kept for retry): {e:#}");
+                }
                 match msg {
                     LaneMsg::Effect(effect) => self.run_effect(effect, true).await,
                     LaneMsg::Shutdown(effects) => {
@@ -322,7 +341,10 @@ mod win {
                     }
                 }
                 Effect::AcquireWirelessEgress(endpoint) => {
-                    let _ = self.egress.acquire(endpoint);
+                    self.egress_error = self.egress.acquire(endpoint).err().map(|e| {
+                        log::warn!("Wireless Egress acquisition failed (will retry): {e:#}");
+                        format!("Wireless Egress acquisition failed: {e:#}")
+                    });
                 }
                 Effect::SuppressMetric { ifindex, target } => {
                     let endpoint = WlanEndpoint {
@@ -331,8 +353,17 @@ mod win {
                     };
                     self.egress.suppress_metric(endpoint, target);
                 }
-                Effect::ReleaseMetric => self.egress.release_metric(),
-                Effect::TeardownRoutes => self.egress.release(),
+                Effect::ReleaseMetric => {
+                    if let Err(e) = self.egress.release_metric() {
+                        log::warn!("Wireless Egress metric restore failed (kept for retry): {e:#}");
+                    }
+                }
+                Effect::TeardownRoutes => {
+                    if let Err(e) = self.egress.release() {
+                        log::warn!("Wireless Egress release failed (kept for retry): {e:#}");
+                    }
+                    self.egress_error = None;
+                }
                 Effect::Settle(duration) => {
                     let wait = sleep(duration);
                     if race_stop {
@@ -342,6 +373,11 @@ mod win {
                     }
                 }
                 Effect::PortalAuth { src_ip, timeout } => {
+                    if let Some(error) = self.egress_error.take() {
+                        self.send(Event::PortalFinished(PortalAttempt::Failed(error)))
+                            .await;
+                        return;
+                    }
                     let url = portal::build_login_url(
                         &self.portal_url,
                         &self.user,

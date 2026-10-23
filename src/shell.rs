@@ -1,7 +1,7 @@
 //! 安装态 shell 集成（Windows）：开始菜单快捷方式（IShellLink COM）、
 //! "应用和功能"卸载项（HKLM）、卸载后延迟删除安装目录（cmd 助手）。
 //!
-//! 不依赖 `crate::setup`（避免模块环）：`START_MENU_FOLDER` 在此定义，
+//! `START_MENU_FOLDER` 在此定义；只借用 setup 的低层文件/注册表快照，
 //! `setup/mod.rs` 反向 re-export。所有移除函数幂等：键/目录缺失不算错误。
 
 use std::path::{Path, PathBuf};
@@ -20,6 +20,74 @@ fn start_menu_dir() -> Result<PathBuf> {
     Ok(PathBuf::from(base)
         .join(r"Microsoft\Windows\Start Menu\Programs")
         .join(START_MENU_FOLDER))
+}
+
+/// Snapshot the exact shortcut files and registry values this installer owns.
+/// Unrelated files and user-supplied registry values survive restoration.
+pub(crate) struct ShellInstallBackup {
+    files: crate::setup::file_backup::FileBackup,
+    registry: crate::setup::registry_backup::RegistryBackup,
+    directory: PathBuf,
+    directory_existed: bool,
+}
+
+impl ShellInstallBackup {
+    pub(crate) fn capture() -> Result<Self> {
+        let directory = start_menu_dir()?;
+        let directory_existed = directory.try_exists()?;
+        let files = crate::setup::file_backup::FileBackup::capture(
+            SHORTCUTS
+                .iter()
+                .map(|s| directory.join(format!("{}.lnk", s.name))),
+        )?;
+        let registry = crate::setup::registry_backup::RegistryBackup::capture(
+            windows::Win32::System::Registry::HKEY_LOCAL_MACHINE,
+            UNINSTALL_SUBKEY,
+            &[
+                "DisplayName",
+                "DisplayVersion",
+                "InstallLocation",
+                "DisplayIcon",
+                "UninstallString",
+                "QuietUninstallString",
+                "NoModify",
+                "NoRepair",
+            ],
+        )?;
+        Ok(Self {
+            files,
+            registry,
+            directory,
+            directory_existed,
+        })
+    }
+
+    pub(crate) fn restore(&self) -> Result<()> {
+        let mut failures = Vec::new();
+        if let Err(e) = self.files.restore() {
+            failures.push(format!("{e:#}"));
+        }
+        if let Err(e) = self.registry.restore() {
+            failures.push(format!("{e:#}"));
+        }
+        if !self.directory_existed {
+            match std::fs::remove_dir(&self.directory) {
+                Ok(()) => {}
+                Err(e)
+                    if matches!(
+                        e.kind(),
+                        std::io::ErrorKind::NotFound | std::io::ErrorKind::DirectoryNotEmpty
+                    ) => {}
+                Err(e) => failures.push(format!("Failed to remove new Start Menu folder: {e}")),
+            }
+        }
+        anyhow::ensure!(
+            failures.is_empty(),
+            "Shell rollback failed: {}",
+            failures.join("; ")
+        );
+        Ok(())
+    }
 }
 
 /// 安装 shell 集成：逐个建快捷方式（目标缺失即失败）后写卸载键。

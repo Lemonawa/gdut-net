@@ -19,7 +19,7 @@ fn state_msg_roundtrip() {
     });
     assert!(bytes.ends_with(b"\n"));
     let mut dec = FrameDecoder::default();
-    let frames = dec.feed(&bytes);
+    let frames = dec.feed(&bytes).unwrap();
     assert_eq!(frames.len(), 1);
     let msg: ServerMsg = serde_json::from_slice(&frames[0]).unwrap();
     assert_eq!(msg, ServerMsg::State { state: snap });
@@ -32,8 +32,8 @@ fn split_partial_frames() {
     let mut dec = FrameDecoder::default();
     let mut all = a.clone();
     all.extend_from_slice(&b[..b.len() - 1]);
-    assert_eq!(dec.feed(&all).len(), 1);
-    assert_eq!(dec.feed(&b[b.len() - 1..]).len(), 1);
+    assert_eq!(dec.feed(&all).unwrap().len(), 1);
+    assert_eq!(dec.feed(&b[b.len() - 1..]).unwrap().len(), 1);
 }
 
 #[test]
@@ -100,4 +100,33 @@ fn event_log_caps_and_formats() {
     assert!(log.ring().back().unwrap().ends_with("event 24"));
     assert!(log.ring().front().unwrap().contains("event 5"));
     assert!(log.ring().front().unwrap().starts_with('[')); // "[HH:MM:SS] ..."
+}
+
+#[test]
+fn decoder_accepts_limit_and_resets_for_next_frame() {
+    let mut dec = FrameDecoder::default();
+    let body = vec![b'x'; MAX_FRAME_BYTES - 1];
+    // Byte-sized chunks exercise incremental scanning without rescanning old data.
+    for byte in &body {
+        assert!(dec.feed(std::slice::from_ref(byte)).unwrap().is_empty());
+    }
+    let frames = dec.feed(b"\nnext\npartial").unwrap();
+    assert_eq!(frames[0].len(), MAX_FRAME_BYTES);
+    assert_eq!(frames[1], b"next\n");
+    assert_eq!(dec.feed(b"\n").unwrap()[0], b"partial\n");
+}
+
+#[test]
+fn decoder_rejects_oversized_partial_and_stays_rejected() {
+    let mut dec = FrameDecoder::default();
+    assert!(dec.feed(&vec![b'x'; MAX_FRAME_BYTES]).unwrap().is_empty());
+    assert_eq!(dec.feed(b"x"), Err(FrameTooLarge));
+    assert_eq!(dec.feed(b"\n"), Err(FrameTooLarge));
+}
+
+#[test]
+fn decoder_rejects_oversized_complete_frame() {
+    let mut input = vec![b'x'; MAX_FRAME_BYTES];
+    input.push(b'\n');
+    assert_eq!(FrameDecoder::default().feed(&input), Err(FrameTooLarge));
 }

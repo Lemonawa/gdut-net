@@ -33,7 +33,8 @@ net start gdut-net                # 再次启动自动重拨成功
   `PrefixOrigin=RouterAdvertisement` 的全局地址；`Get-NetRoute -AddressFamily IPv6 -DestinationPrefix ::/0`
   有 gdut 条目；`Get-NetConnectionProfile` 中 gdut 项 = `Internet/Internet`。
 - PPP 接口不承载 DNS：`Get-DnsClientServerAddress` 里 gdut 的 IPv4 列表应为空（DNS 由物理口提供），
-  服务日志出现 `PPP interface 'gdut' DNS detached (physical NIC serves DNS; AAAA ok)`。
+  服务日志先出现 `PPP interface 'gdut' DNS detached (other up interface carries DNS)`，
+  后台解析复核另记 `DNS observation after PPP DNS detach: resolution ok, AAAA=true`（复核不阻塞拨号）。
   反例（必现）：PPP 带 DNS 时 Windows 不向应用交付 AAAA —— `ping -6 域名`/`curl -6 域名` 全空而 `nslookup` 正常。
 - 直连冒烟：`curl --noproxy "*" -6 -k -o NUL -w "%{http_code}" https://www.baidu.com/` = 200；
   `ping -6` 到 CN v6 目标 0% 丢包。
@@ -162,3 +163,22 @@ reg query "HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\gdut-net"
 - `runtime.rs::Shell` 与 `supervisor.rs` 各持一份 `Config`（核心只读构造时的副本、不再写回；壳负责持久化；扩展时注意）。
 - `tests/status.rs` 未钉：`wphase_zh(Authing/Error)`、`session_zh(Idle)`、`heartbeat_en(Running)`、`(ip, error)` 优先级。
 - 既有（两波之前）：debug 构建 `gdut-net` 会触发 clap debug-assert panic（`password_stdin` 的 `requires = "cmd"` 无对应参数），release 与测试不受影响。
+
+
+## 异常路径加固（2026-10-23，待 Windows 真机复验）
+
+自动回归覆盖：真实 TCP 慢响应的请求总时限、取消后关闭 socket、完整探针响应头提前结束、
+IPC 64 KiB 帧边界与超长断开、命令合并、路由添加/删除及 metric 恢复失败重试、
+安装文件中途失败恢复，以及损坏载荷条目数拒绝。
+
+以下项目尚未以交叉编译替代真机验收；安装失败注入在隔离 Windows 测试机进行。
+
+- [ ] 服务不可用时连续点击托盘重拨/切模式，菜单与主界面唤出保持响应；
+  恢复服务后新命令可发送，积压只保留一次重拨及最新模式。
+- [ ] DNS 清除成功后，拨号成功快照无需等待后台解析；DNS 慢时不重复积累解析线程。
+  超时的 `netsh` 已终止，无延迟网络配置写入；不执行 DNS 回写。
+- [ ] 无线出口瞬时失败恢复后，同网关/接口能够重新添加 /32；让位后的删除/metric
+  恢复失败会在无后续无线消息时继续每 2s 重试，成功后不再空转重试。
+- [ ] 安装前记录旧 exe/config/PBK 的 SHA-256；分别在文件替换、凭据写入、
+  shell 集成和启动服务阶段注入失败，核对旧文件、凭据和系统入口恢复且旧服务可启动。
+  无法完成恢复时界面明确报错，不宣称恢复成功。

@@ -119,7 +119,37 @@ mod win {
             "source=static",
             "address=none",
         ];
-        let out = std::process::Command::new("netsh").args(args).output()?;
+        // Bound the mutating command itself: timeout must kill AND reap netsh,
+        // never leave a detached process that can change DNS after we return.
+        use std::process::{Command, Stdio};
+        use std::time::{Duration, Instant};
+        let mut child = Command::new("netsh")
+            .args(args)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()?;
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            match child.try_wait() {
+                Ok(Some(_)) => break,
+                Ok(None) => {}
+                Err(e) => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return Err(e.into());
+                }
+            }
+            if Instant::now() >= deadline {
+                // kill may race a normal exit; wait still reaps the process.
+                let killed = child.kill();
+                let reaped = child.wait();
+                return Err(anyhow!(
+                    "netsh DNS command timed out (kill={killed:?}, wait={reaped:?})"
+                ));
+            }
+            std::thread::sleep(Duration::from_millis(25));
+        }
+        let out = child.wait_with_output()?;
         if !out.status.success() {
             return Err(anyhow!(
                 "netsh {} failed: {}",
@@ -140,55 +170,69 @@ mod win {
             .unwrap_or(false)
     }
 
-    fn resolves(host: &str) -> bool {
-        use std::net::ToSocketAddrs;
-        (host, 443)
-            .to_socket_addrs()
-            .map(|mut it| it.next().is_some())
-            .unwrap_or(false)
-    }
-
-    fn has_aaaa(host: &str) -> bool {
-        use std::net::{SocketAddr, ToSocketAddrs};
-        (host, 443)
-            .to_socket_addrs()
-            .map(|mut it| it.any(|a| matches!(a, SocketAddr::V6(_))))
-            .unwrap_or(false)
+    /// DNS observations never change network settings and never delay a dial.
+    /// A stalled OS resolver can occupy at most ONE observer thread process-wide.
+    fn observe_dns() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        static OBSERVING: AtomicBool = AtomicBool::new(false);
+        if OBSERVING
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            log::debug!("DNS observation already in progress; skipping duplicate");
+            return;
+        }
+        let spawned = std::thread::Builder::new()
+            .name("gdut-dns-observer".into())
+            .spawn(|| {
+                struct Reset;
+                impl Drop for Reset {
+                    fn drop(&mut self) {
+                        OBSERVING.store(false, Ordering::Release);
+                    }
+                }
+                let _reset = Reset;
+                use std::net::{SocketAddr, ToSocketAddrs};
+                match ("www.baidu.com", 443).to_socket_addrs() {
+                    Ok(addresses) => {
+                        let addresses: Vec<_> = addresses.collect();
+                        if addresses.is_empty() {
+                            log::warn!(
+                                "DNS observation after PPP DNS detach returned no addresses"
+                            );
+                        } else {
+                            let aaaa = addresses.iter().any(|a| matches!(a, SocketAddr::V6(_)));
+                            log::info!(
+                                "DNS observation after PPP DNS detach: resolution ok, AAAA={aaaa}"
+                            );
+                        }
+                    }
+                    Err(e) => log::warn!(
+                        "DNS observation after PPP DNS detach failed: {e}; leaving DNS unchanged"
+                    ),
+                }
+            });
+        if let Err(e) = spawned {
+            OBSERVING.store(false, Ordering::Release);
+            log::warn!("Failed to start DNS observer (ignored): {e}");
+        }
     }
 
     /// 见 `super::detach_ppp_dns`。
     pub(super) fn detach_ppp_dns(entry_name: &str) {
-        const PROBE: &str = "www.baidu.com";
         if !other_adapter_has_dns() {
             // 物理口没 DNS 时不动 PPP 的，避免把解析清没。
             log::info!("Skip detaching PPP DNS: no other up adapter carries DNS");
             return;
         }
         if let Err(e) = set_ppp_dns_none(entry_name) {
-            log::warn!("Clear PPP DNS failed ({e:#}); keeping RAS-provided DNS");
+            log::warn!("Clear PPP DNS failed ({e:#}); no further DNS writes attempted");
             return;
         }
         // 只观测、不回写：写回会重协商 PPP 会话（见 set_ppp_dns_none 注释）。
         // 真出问题也只是当前会话，下次拨号 RAS 重新下发即恢复。
-        for attempt in 0..4u32 {
-            if attempt > 0 {
-                std::thread::sleep(std::time::Duration::from_millis(1200));
-            }
-            if resolves(PROBE) {
-                let aaaa = if has_aaaa(PROBE) {
-                    "AAAA ok"
-                } else {
-                    "AAAA missing"
-                };
-                log::info!(
-                    "PPP interface '{entry_name}' DNS detached (physical NIC serves DNS; {aaaa})"
-                );
-                return;
-            }
-        }
-        log::warn!(
-            "DNS still failing after detaching PPP DNS; leaving as-is (next dial restores RAS-provided DNS)"
-        );
+        log::info!("PPP interface '{entry_name}' DNS detached (other up interface carries DNS)");
+        observe_dns();
     }
 
     /// GetAdaptersAddresses 两次调用法：先探缓冲区大小再正式取。

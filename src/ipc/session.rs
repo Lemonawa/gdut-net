@@ -78,7 +78,7 @@ mod win {
                 if n == 0 {
                     bail!("Server closed the connection");
                 }
-                self.buf.extend(self.decoder.feed(&chunk[..n]));
+                self.buf.extend(self.decoder.feed(&chunk[..n])?);
             }
         }
 

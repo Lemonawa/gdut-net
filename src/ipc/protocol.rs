@@ -112,20 +112,40 @@ pub fn encode_frame<T: Serialize>(msg: &T) -> Vec<u8> {
     out
 }
 
+/// Maximum JSON-line frame size, including its trailing newline.
+/// Snapshots contain at most 20 recent events; 64 KiB leaves room for diagnostics.
+pub const MAX_FRAME_BYTES: usize = 64 * 1024;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[error("IPC frame exceeds the 64 KiB limit")]
+pub struct FrameTooLarge;
+
 #[derive(Debug, Default)]
 pub struct FrameDecoder {
     buf: Vec<u8>,
+    rejected: bool,
 }
 
 impl FrameDecoder {
-    pub fn feed(&mut self, chunk: &[u8]) -> VecDeque<Vec<u8>> {
-        self.buf.extend_from_slice(chunk);
-        let mut frames = VecDeque::new();
-        while let Some(pos) = self.buf.iter().position(|&b| b == b'\n') {
-            let frame: Vec<u8> = self.buf.drain(..=pos).collect();
-            frames.push_back(frame);
+    /// Scan only newly received bytes. An oversized frame permanently rejects
+    /// this decoder; the transport must close the connection.
+    pub fn feed(&mut self, chunk: &[u8]) -> Result<VecDeque<Vec<u8>>, FrameTooLarge> {
+        if self.rejected {
+            return Err(FrameTooLarge);
         }
-        frames
+        let mut frames = VecDeque::new();
+        for part in chunk.split_inclusive(|&byte| byte == b'\n') {
+            if part.len() > MAX_FRAME_BYTES - self.buf.len() {
+                self.buf.clear();
+                self.rejected = true;
+                return Err(FrameTooLarge);
+            }
+            self.buf.extend_from_slice(part);
+            if part.last() == Some(&b'\n') {
+                frames.push_back(std::mem::take(&mut self.buf));
+            }
+        }
+        Ok(frames)
     }
 }
 

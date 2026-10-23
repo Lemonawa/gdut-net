@@ -77,3 +77,12 @@ fn empty_entries_are_allowed() {
     let e: Vec<Entry> = got;
     assert!(e.is_empty());
 }
+
+#[test]
+fn corrupt_footer_count_is_rejected_before_allocation() {
+    let mut packed = pack(b"MZ", &entries()).unwrap();
+    let count_pos = packed.len() - FOOTER_LEN + 12;
+    packed[count_pos..count_pos + 4].copy_from_slice(&u32::MAX.to_le_bytes());
+    let error = unpack(&packed).unwrap_err();
+    assert!(error.to_string().contains("TOC capacity"));
+}

@@ -45,18 +45,20 @@ pub fn cli_test(cfg_path: &Path) -> Result<()> {
     // 自包含 Wireless Egress：结束即释放（含失败路径）。
     let mut wireless_egress = egress::WirelessEgress::new(routes::RouteGuard::new());
     wireless_egress.own_destinations(&[portal_ip]);
-    let settle = wireless_egress.acquire(egress::WlanEndpoint {
-        gateway: gw,
-        ifindex: adapter.ifindex,
-    });
     struct Teardown(egress::WirelessEgress<routes::RouteGuard>);
     impl Drop for Teardown {
         fn drop(&mut self) {
-            self.0.release();
+            if let Err(e) = self.0.release() {
+                log::warn!("Wireless test cleanup failed (will retry on drop): {e:#}");
+            }
             let _ = wlan::disassociate();
         }
     }
-    let _teardown = Teardown(wireless_egress);
+    let mut teardown = Teardown(wireless_egress);
+    let settle = teardown.0.acquire(egress::WlanEndpoint {
+        gateway: gw,
+        ifindex: adapter.ifindex,
+    })?;
     println!("Waiting {}ms for route propagation ...", settle.as_millis());
     std::thread::sleep(settle);
 
@@ -100,7 +102,7 @@ pub fn cli_test(cfg_path: &Path) -> Result<()> {
         None => println!("RESULT: NO REPLY (route/TUN interference? see ADR-0005 §routes)"),
     }
     println!("Cleaning up (disconnecting WLAN) ...");
-    drop(_teardown);
+    drop(teardown);
     println!("Done.");
     Ok(())
 }

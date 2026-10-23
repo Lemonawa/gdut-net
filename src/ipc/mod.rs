@@ -1,3 +1,5 @@
+#[cfg(any(windows, test))]
+pub(crate) mod commands;
 pub mod protocol;
 #[cfg(windows)]
 pub mod server;

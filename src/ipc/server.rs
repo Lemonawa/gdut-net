@@ -62,7 +62,14 @@ mod win {
                     match read {
                         Ok(0) | Err(_) => break,
                         Ok(n) => {
-                            for frame in decoder.feed(&buf[..n]) {
+                            let frames = match decoder.feed(&buf[..n]) {
+                                Ok(frames) => frames,
+                                Err(e) => {
+                                    log::warn!("Closing invalid IPC connection: {e}");
+                                    return;
+                                }
+                            };
+                            for frame in frames {
                                 match serde_json::from_slice::<ClientMsg>(&frame) {
                                     Ok(ClientMsg::Cmd { c }) => {
                                         let _ = cmd_tx.send(c).await;

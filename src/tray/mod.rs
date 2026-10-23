@@ -27,6 +27,7 @@ use windows::Win32::System::Registry::{
 };
 use windows::Win32::System::Threading::{CreateEventW, INFINITE};
 
+use crate::ipc::commands::{self, CommandSender};
 use crate::ipc::protocol::{Command, NetMode, StateSnapshot};
 use crate::ipc::session::{Session, SyncSession};
 use crate::status::Light;
@@ -151,18 +152,8 @@ fn message_box_home_mode_hint() {
 }
 
 /// 从泵线程显示/聚焦常驻 GUI：窗口线程活 → 唤醒；否则新建。
-fn show_gui(
-    gui: &GuiShared,
-    snapshot: &SharedSnapshot,
-    redial_tx: &mpsc::Sender<()>,
-    setmode_tx: &mpsc::Sender<NetMode>,
-) {
-    gui::show_or_focus(
-        Arc::clone(gui),
-        Arc::clone(snapshot),
-        redial_tx.clone(),
-        setmode_tx.clone(),
-    );
+fn show_gui(gui: &GuiShared, snapshot: &SharedSnapshot, command_tx: &CommandSender) {
+    gui::show_or_focus(Arc::clone(gui), Arc::clone(snapshot), command_tx.clone());
 }
 
 /// 32x32 RGBA 方块图标（代码生成，无需二进制图片资源）：2px 透明留白，
@@ -359,11 +350,20 @@ pub fn run_tray(show_gui_at_start: bool) -> Result<()> {
     let mut last_kind = IconKind::Down;
     let mut last_tooltip = crate::status::status_line_zh(None);
 
-    // IPC 线程 → 泵线程：状态文本；面板点击重拨也汇聚到泵线程统一发，
-    // 避免两处并发建 IPC 会话。
+    // Status updates return to the pump; all UI commands use a bounded mailbox
+    // and a dedicated transport worker, so unavailable services cannot stall it.
     let (status_tx, status_rx) = mpsc::channel::<String>();
-    let (panel_redial_tx, panel_redial_rx) = mpsc::channel::<()>();
-    let (panel_setmode_tx, panel_setmode_rx) = mpsc::channel::<NetMode>();
+    let (command_tx, command_rx) = commands::channel();
+    std::thread::Builder::new()
+        .name("gdut-net-tray-commands".into())
+        .spawn(move || {
+            while let Some(batch) = command_rx.recv() {
+                for cmd in batch {
+                    send_cmd_logged(cmd);
+                }
+            }
+        })
+        .context("Failed to start tray command worker")?;
     {
         let snapshot = Arc::clone(&snapshot);
         let status_tx = status_tx.clone();
@@ -381,7 +381,7 @@ pub fn run_tray(show_gui_at_start: bool) -> Result<()> {
     };
     let gui: GuiShared = Arc::new(Mutex::new(GuiState::Absent));
     if show_gui_at_start {
-        show_gui(&gui, &snapshot, &panel_redial_tx, &panel_setmode_tx);
+        show_gui(&gui, &snapshot, &command_tx);
     }
 
     let menu_rx = MenuEvent::receiver();
@@ -397,7 +397,7 @@ pub fn run_tray(show_gui_at_start: bool) -> Result<()> {
         }
         if pump.woke {
             log::info!("Show-GUI request received");
-            show_gui(&gui, &snapshot, &panel_redial_tx, &panel_setmode_tx);
+            show_gui(&gui, &snapshot, &command_tx);
         }
 
         // 左键单击托盘 → 打开日常 GUI（菜单已改为只右键弹）。
@@ -408,27 +408,25 @@ pub fn run_tray(show_gui_at_start: bool) -> Result<()> {
                 ..
             } = ev
             {
-                show_gui(&gui, &snapshot, &panel_redial_tx, &panel_setmode_tx);
+                show_gui(&gui, &snapshot, &command_tx);
             }
         }
         while let Ok(event) = menu_rx.try_recv() {
             if event.id == *mode_exclusive.id() {
-                send_set_mode(NetMode::WiredExclusive);
+                command_tx.send(Command::SetMode {
+                    mode: NetMode::WiredExclusive,
+                });
             } else if event.id == *mode_standby.id() {
-                send_set_mode(NetMode::WiredPlusStandby);
+                command_tx.send(Command::SetMode {
+                    mode: NetMode::WiredPlusStandby,
+                });
             } else if event.id == *redial_item.id() {
-                send_redial();
+                command_tx.send(Command::Redial);
             } else if event.id == *panel_item.id() {
-                show_gui(&gui, &snapshot, &panel_redial_tx, &panel_setmode_tx);
+                show_gui(&gui, &snapshot, &command_tx);
             } else if event.id == *quit_item.id() {
                 std::process::exit(0);
             }
-        }
-        while panel_redial_rx.try_recv().is_ok() {
-            send_redial();
-        }
-        while let Ok(mode) = panel_setmode_rx.try_recv() {
-            send_set_mode(mode);
         }
         // IPC 线程送来的最新文本（只保留最后一条即可）。
         let mut latest = None;
@@ -468,19 +466,9 @@ pub fn run_tray(show_gui_at_start: bool) -> Result<()> {
     }
 }
 
-/// 发送 Redial 命令；失败记日志（服务大概率已停止，IPC 线程会 toast）。
-fn send_redial() {
-    send_cmd_logged("redial", Command::Redial);
-}
-
-/// 发送 SetMode 命令（托盘模式勾选项）；失败记日志，实际生效以服务端
-/// 下一条快照回显的 mode 为准（泵线程会重设勾选）。
-fn send_set_mode(mode: NetMode) {
-    send_cmd_logged("set mode", Command::SetMode { mode });
-}
-
-/// 单次命令发送：`SyncSession` 自建 runtime + 连管道 + 发帧，失败只记日志。
-fn send_cmd_logged(what: &str, cmd: Command) {
+/// Runs only on the command worker. Connection retries never hold the UI pump.
+fn send_cmd_logged(cmd: Command) {
+    let what = format!("{cmd:?}");
     let result = SyncSession::connect().and_then(|mut session| session.send(cmd));
     if let Err(e) = result {
         log::warn!("Failed to send {what} command: {e:#}");

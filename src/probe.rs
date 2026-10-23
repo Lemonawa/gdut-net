@@ -160,18 +160,19 @@ mod win {
     }
 
     /// HTTP GET 探测（HTTP/1.0，不跟随重定向），返回 (状态码, Location 小写)。
-    /// 薄包装 `crate::http::get`：socket/解析/超时等任何失败 → None + debug 日志；
-    /// AcceptPartial：读错误但已有字节时仍用已收到的应答判状态（旧行为等价）。
-    fn http_get_probe(src_ip: Ipv4Addr, http_url: &str) -> Option<(u16, String)> {
-        let req = crate::http::Request {
-            url: http_url,
-            bind_ip: src_ip,
-            user_agent: "gdut-net-probe",
-            timeout: HTTP_TIMEOUT,
-            max_bytes: HTTP_MAX_RESPONSE,
-            read_policy: crate::http::ReadPolicy::AcceptPartial,
-        };
-        match crate::http::get(&req) {
+    /// 薄包装 `crate::http::get_async`：socket/解析/超时等任何失败 → None + debug 日志；
+    /// AcceptPartial：完整响应头到达即结束；不完整头不能用于判定认证跳转。
+    async fn http_get_probe(src_ip: Ipv4Addr, http_url: &str) -> Option<(u16, String)> {
+        match crate::http::get_async(
+            http_url.to_string(),
+            src_ip,
+            "gdut-net-probe",
+            HTTP_TIMEOUT,
+            HTTP_MAX_RESPONSE,
+            crate::http::ReadPolicy::AcceptPartial,
+        )
+        .await
+        {
             Ok(r) => Some((r.status, r.location_lower)),
             Err(e) => {
                 log::debug!("Probe: HTTP request failed: {e:#}");
@@ -241,18 +242,16 @@ mod win {
         } else {
             gateway.unwrap()
         };
-        let icmp_ok = Some(
-            spawn_blocking(move || icmp_gateway_alive(src_ip, icmp_target))
-                .await
-                .unwrap_or(false),
+        // Both observations are required even if ICMP succeeds (a kicked
+        // session can still reach its gateway), but their I/O is independent.
+        let (icmp, http) = tokio::join!(
+            spawn_blocking(move || icmp_gateway_alive(src_ip, icmp_target)),
+            http_get_probe(src_ip, http_url),
         );
-        let url = http_url.to_string();
-        let http = spawn_blocking(move || http_get_probe(src_ip, &url))
-            .await
-            .unwrap_or(None)
-            .map(|(status, location)| {
-                verdict_from_http(status == 302, crate::http::is_auth_redirect(&location))
-            });
+        let icmp_ok = Some(icmp.unwrap_or(false));
+        let http = http.map(|(status, location)| {
+            verdict_from_http(status == 302, crate::http::is_auth_redirect(&location))
+        });
         let verdict = combine(icmp_ok, http);
         log::info!(
             "Probe: ICMP {}, HTTP {} -> {verdict:?}",

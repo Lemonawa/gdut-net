@@ -117,8 +117,12 @@ mod win {
     pub enum PrevService {
         /// 没有服务：失败时删除本次可能新建的服务（不存在视为成功）。
         None,
-        /// 有服务且路径已知：失败时恢复注册并尽力启动。
-        Known(PathBuf),
+        /// 完整原始命令行与启动/运行状态：失败时精确恢复。
+        Known {
+            command: PathBuf,
+            start_type: ServiceStartType,
+            was_running: bool,
+        },
         /// 有服务但路径读不出（或查询失败）：失败时不碰注册，也绝不删除；尽力重新启动服务。
         Unknown,
     }
@@ -277,46 +281,212 @@ mod win {
         })
     }
 
+    /// Config/PBK bytes plus the previous RAS credential. Capture before any
+    /// installation writes; the decrypted password stays in memory only.
+    pub struct InstallBackup {
+        files: crate::setup::file_backup::FileBackup,
+        cfg: Config,
+        old_password: Option<String>,
+        had_entry: bool,
+        autostart: crate::setup::registry_backup::RegistryBackup,
+    }
+
+    impl InstallBackup {
+        pub fn capture(cfg_path: &Path) -> Result<Self> {
+            let had_config = cfg_path.exists();
+            let cfg = if had_config {
+                Config::load(cfg_path)?
+            } else {
+                Config::default()
+            };
+            let had_entry = dial_entry_exists(&cfg)?;
+            // With an orphan PBK we cannot recover its credential reliably.
+            // Refuse before changing it rather than promise an unsafe rollback.
+            if had_entry && !had_config {
+                bail!(
+                    "Existing dial phonebook has no config; restore its config before installing"
+                );
+            }
+            let old_password = if had_entry {
+                Some(
+                    crate::crypto::unprotect(&cfg.account.password_blob)
+                        .context("Cannot back up existing dial credentials")?,
+                )
+            } else {
+                None
+            };
+            let files = crate::setup::file_backup::FileBackup::capture([
+                cfg_path.to_path_buf(),
+                PathBuf::from(&cfg.dial.pbk_path),
+            ])?;
+            Ok(Self {
+                files,
+                cfg,
+                old_password,
+                had_entry,
+                autostart: crate::setup::registry_backup::RegistryBackup::capture(
+                    windows::Win32::System::Registry::HKEY_CURRENT_USER,
+                    r"Software\Microsoft\Windows\CurrentVersion\Run",
+                    &["gdut-net-tray"],
+                )?,
+            })
+        }
+
+        pub fn restore(&self) -> Result<()> {
+            let mut failures = Vec::new();
+            // A fresh installation may have written a credential outside the
+            // PBK. Clear it while the new entry still exists, before removal.
+            if !self.had_entry {
+                match dial_entry_exists(&self.cfg) {
+                    Ok(true) => {
+                        if let Err(e) = clear_install_credentials(&self.cfg) {
+                            failures.push(format!("Failed to clear new RAS credentials: {e:#}"));
+                        }
+                    }
+                    Ok(false) => {}
+                    Err(e) => {
+                        failures.push(format!("Failed to inspect new RAS credentials: {e:#}"))
+                    }
+                }
+            }
+            if let Err(e) = self.autostart.restore() {
+                failures.push(format!("Failed to restore tray autostart: {e:#}"));
+            }
+            if let Err(e) = self.files.restore() {
+                failures.push(format!("{e:#}"));
+            }
+            if let Some(password) = &self.old_password {
+                if let Err(e) = crate::ras::set_credentials(
+                    &self.cfg.dial.pbk_path,
+                    &self.cfg.dial.entry_name,
+                    &self.cfg.account.student_id,
+                    password,
+                ) {
+                    failures.push(format!("Failed to restore previous RAS credentials: {e:#}"));
+                }
+            }
+            anyhow::ensure!(failures.is_empty(), "{}", failures.join("; "));
+            Ok(())
+        }
+    }
+
+    fn dial_entry_exists(cfg: &Config) -> Result<bool> {
+        if !Path::new(&cfg.dial.pbk_path).exists() {
+            return Ok(false);
+        }
+        use windows::core::PCWSTR;
+        use windows::Win32::Foundation::ERROR_ALREADY_EXISTS;
+        use windows::Win32::NetworkManagement::Rras::RasValidateEntryNameW;
+        let pbk = crate::win32::wide(&cfg.dial.pbk_path);
+        let entry = crate::win32::wide(&cfg.dial.entry_name);
+        let code = unsafe { RasValidateEntryNameW(PCWSTR(pbk.as_ptr()), PCWSTR(entry.as_ptr())) };
+        if code == ERROR_ALREADY_EXISTS.0 {
+            return Ok(true);
+        }
+        anyhow::ensure!(code == 0, "Cannot inspect existing RAS entry: {code}");
+        Ok(false)
+    }
+
+    fn clear_install_credentials(cfg: &Config) -> Result<()> {
+        use windows::core::PCWSTR;
+        use windows::Win32::NetworkManagement::Rras::{
+            RASCM_Password, RASCM_UserName, RasSetCredentialsW, RASCREDENTIALSW,
+        };
+        let credential = RASCREDENTIALSW {
+            dwSize: std::mem::size_of::<RASCREDENTIALSW>() as u32,
+            dwMask: RASCM_UserName | RASCM_Password,
+            ..Default::default()
+        };
+        let pbk = crate::win32::wide(&cfg.dial.pbk_path);
+        let entry = crate::win32::wide(&cfg.dial.entry_name);
+        let code = unsafe {
+            RasSetCredentialsW(
+                PCWSTR(pbk.as_ptr()),
+                PCWSTR(entry.as_ptr()),
+                &credential,
+                true,
+            )
+        };
+        anyhow::ensure!(code == 0, "RasSetCredentialsW(clear) failed: {code}");
+        Ok(())
+    }
+
     /// 安装核心；失败立即按 `prev` 回滚，把回滚实情一并回报（CLI 与 setup 共用）。
     pub fn install_with_rollback(
         req: InstallRequest,
         prev: &PrevService,
     ) -> Result<InstallOutcome, InstallFailure> {
         // 回滚要用本次请求的配置路径：`install_core` 会 move 掉 req。
+        if matches!(prev, PrevService::Unknown) {
+            return Err(InstallFailure {
+                error: anyhow!(
+                    "Cannot safely back up service state; retry when service status is available"
+                ),
+                rollback: RollbackOutcome::NotNeeded,
+            });
+        }
         let cfg_path = req.cfg_path.clone();
+        let backup = InstallBackup::capture(&cfg_path).map_err(|error| InstallFailure {
+            error,
+            rollback: RollbackOutcome::NotNeeded,
+        })?;
         match install_core(req) {
             Ok(outcome) => Ok(outcome),
             Err(error) => {
                 log::error!("Install failed (rolling back): {error:#}");
-                let rollback = rollback_install(prev, &cfg_path);
+                let restored = backup.restore();
+                let service_rollback = rollback_install(prev, &cfg_path);
+                let rollback = match restored {
+                    Ok(()) => service_rollback,
+                    Err(e) => RollbackOutcome::Failed(format!("{e:#}")),
+                };
                 Err(InstallFailure { error, rollback })
             }
         }
     }
 
-    /// 安装开始前的服务状态：回滚的唯一依据。
-    /// `NotInstalled` = 本次安装前无服务（失败时删除本次新建的服务）；
-    /// `Unknown` = 查询失败（不动注册、尽力启动）。
+    /// Capture original command line, start type and whether it was running.
+    /// Query failures or transitional states are Unknown; installation refuses
+    /// to change a service whose prior state cannot be recovered safely.
     pub fn capture_prev_service() -> PrevService {
-        match install_state() {
-            InstallState::Installed {
-                service_exe: Some(exe),
-                ..
-            } => PrevService::Known(exe),
-            InstallState::Installed {
-                service_exe: None, ..
-            } => PrevService::Unknown,
-            InstallState::NotInstalled => PrevService::None,
-            // 查询失败（SCM 不可达）：误删真实服务的代价远高于漏回滚。
-            InstallState::Unknown => PrevService::Unknown,
+        let Ok(manager) =
+            ServiceManager::local_computer(None::<&str>, ServiceManagerAccess::CONNECT)
+        else {
+            return PrevService::Unknown;
+        };
+        match manager.open_service(
+            SERVICE_NAME,
+            ServiceAccess::QUERY_CONFIG | ServiceAccess::QUERY_STATUS,
+        ) {
+            Ok(service) => match (service.query_config(), service.query_status()) {
+                (Ok(cfg), Ok(status))
+                    if matches!(
+                        status.current_state,
+                        ServiceState::Running | ServiceState::Stopped
+                    ) =>
+                {
+                    PrevService::Known {
+                        command: cfg.executable_path,
+                        start_type: cfg.start_type,
+                        was_running: status.current_state == ServiceState::Running,
+                    }
+                }
+                _ => PrevService::Unknown,
+            },
+            Err(windows_service::Error::Winapi(e))
+                if e.raw_os_error() == Some(ERROR_SERVICE_DOES_NOT_EXIST.0 as i32) =>
+            {
+                PrevService::None
+            }
+            Err(_) => PrevService::Unknown,
         }
     }
 
-    /// 失败回滚：恢复旧服务注册（或删除新建服务），并回报回滚实情。
-    /// `cfg_path` 是本次安装请求的配置路径（可能是 `--config` 指定的非缺省值）：
-    /// 恢复注册必须指回它，否则自定义路径安装失败会把服务指向缺省配置。
-    /// 服务原本存在但路径未知时不动注册（宁可不回滚，也不误删），但尽力把停掉的服务拉起来。
-    pub fn rollback_install(prev: &PrevService, cfg_path: &Path) -> RollbackOutcome {
+    /// Restore the exact previous service command/start type and running state,
+    /// or delete a newly created service. The config path remains in the public
+    /// signature for existing callers; the saved command is authoritative.
+    /// Unknown is retained for reporting callers; installers reject it before writes.
+    pub fn rollback_install(prev: &PrevService, _cfg_path: &Path) -> RollbackOutcome {
         match prev {
             PrevService::Unknown => {
                 log::warn!(
@@ -339,22 +509,22 @@ mod win {
                     RollbackOutcome::Failed(format!("{e:#}"))
                 }
             },
-            PrevService::Known(exe) => {
-                match restore_service_path(cfg_path, exe) {
-                    // 旧服务被本次安装停掉了：恢复注册后尽力把它拉起来。
-                    Ok(()) => match start_service() {
-                        Ok(()) => RollbackOutcome::Restored,
-                        Err(e) => {
-                            log::error!(
-                                "Rollback restored registration but service start failed: {e:#}"
-                            );
-                            RollbackOutcome::Failed(format!("服务注册已恢复，但启动失败：{e:#}"))
-                        }
-                    },
-                    Err(e) => {
-                        log::error!("Rollback restore_service_path failed: {e:#}");
-                        RollbackOutcome::Failed(format!("{e:#}"))
+            PrevService::Known {
+                command,
+                start_type,
+                was_running,
+            } => {
+                match restore_previous_service(command, *start_type).and_then(|()| {
+                    if *was_running {
+                        start_service()
+                    } else {
+                        Ok(())
                     }
+                }) {
+                    Ok(()) => RollbackOutcome::Restored,
+                    Err(e) => RollbackOutcome::Failed(format!(
+                        "Failed to restore previous service: {e:#}"
+                    )),
                 }
             }
         }
@@ -810,6 +980,36 @@ mod win {
         Ok(refreshed)
     }
 
+    /// Restore the exact original command line, including a custom config
+    /// argument, and its start type. Home mode stays disabled/stopped.
+    fn restore_previous_service(command: &Path, start_type: ServiceStartType) -> Result<()> {
+        use std::os::windows::ffi::OsStrExt;
+        use windows::core::PCWSTR;
+        use windows::Win32::System::Services::{
+            ChangeServiceConfigW, ENUM_SERVICE_TYPE, SC_HANDLE, SERVICE_ERROR, SERVICE_NO_CHANGE,
+            SERVICE_START_TYPE,
+        };
+        let manager = ServiceManager::local_computer(None::<&str>, ServiceManagerAccess::CONNECT)?;
+        let service = manager.open_service(SERVICE_NAME, ServiceAccess::CHANGE_CONFIG)?;
+        let command: Vec<u16> = command.as_os_str().encode_wide().chain(Some(0)).collect();
+        unsafe {
+            ChangeServiceConfigW(
+                SC_HANDLE(service.raw_handle()),
+                ENUM_SERVICE_TYPE(SERVICE_NO_CHANGE),
+                SERVICE_START_TYPE(start_type.to_raw()),
+                SERVICE_ERROR(SERVICE_NO_CHANGE),
+                PCWSTR(command.as_ptr()),
+                PCWSTR::null(),
+                None,
+                PCWSTR::null(),
+                PCWSTR::null(),
+                PCWSTR::null(),
+                PCWSTR::null(),
+            )
+        }?;
+        Ok(())
+    }
+
     /// 安装失败回滚：把服务重新指回旧 exe（不重写配置）。
     pub fn restore_service_path(cfg_path: &Path, service_exe: &Path) -> Result<()> {
         create_service(cfg_path, service_exe)?;
@@ -821,7 +1021,12 @@ mod win {
         let manager = ServiceManager::local_computer(None::<&str>, ServiceManagerAccess::CONNECT)?;
         match manager.open_service(SERVICE_NAME, ServiceAccess::DELETE) {
             Ok(svc) => svc.delete().context("Failed to delete service"),
-            Err(_) => Ok(()),
+            Err(windows_service::Error::Winapi(e))
+                if e.raw_os_error() == Some(ERROR_SERVICE_DOES_NOT_EXIST.0 as i32) =>
+            {
+                Ok(())
+            }
+            Err(error) => Err(error).context("Failed to open service for rollback deletion"),
         }
     }
 
@@ -886,8 +1091,8 @@ pub use win::{
     capture_prev_service, delete_service, existing_account, home_mode_standby, install,
     install_core, install_state, install_with_rollback, restore_service_path, rollback_install,
     rollback_line_en, service_main, start_service, stop_service, uninstall, uninstall_core,
-    Credential, InstallFailure, InstallOutcome, InstallRequest, InstallState, PrevService,
-    PurgeStep, RollbackOutcome, Step, UninstallReport, STEP_UNINSTALL_AUTOSTART,
+    Credential, InstallBackup, InstallFailure, InstallOutcome, InstallRequest, InstallState,
+    PrevService, PurgeStep, RollbackOutcome, Step, UninstallReport, STEP_UNINSTALL_AUTOSTART,
     STEP_UNINSTALL_ENTROPY, STEP_UNINSTALL_EVENT_SOURCE, STEP_UNINSTALL_SERVICE,
 };
 

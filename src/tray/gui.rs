@@ -1,11 +1,10 @@
 //! 日常状态窗口（常驻）：首次点开创建；关窗 = 隐藏；左键托盘唤出。
-//! egui/eframe glow（ADR-0006）；快照每帧拉取，操作经 mpsc 回泵线程发 IPC。
+//! egui/eframe glow（ADR-0006）；快照每帧拉取，操作经有界邮箱交后台线程发 IPC。
 //!
 //! 视觉方向"校园一卡通 / 圈存机"（`.impeccable/surfaces/src-tray-gui-rs.md`）：
 //! 顶部卡面（卡蓝地、学号如卡号、状态章），中部票纸白小票（大字状态、虚线字段
 //! 行、事件流水），底部圈存机软键排。单窗口 460×540；不发网络请求，命令走 IPC。
 
-use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -13,7 +12,8 @@ use eframe::egui;
 use eframe::egui::ViewportBuilder;
 use eframe::{NativeOptions, Renderer};
 
-use crate::ipc::protocol::{HeartbeatStatus, NetMode, StateSnapshot};
+use crate::ipc::commands::CommandSender;
+use crate::ipc::protocol::{Command, HeartbeatStatus, NetMode, StateSnapshot};
 use crate::status::Primary;
 
 use super::SharedSnapshot;
@@ -76,8 +76,7 @@ pub(crate) type GuiShared = Arc<Mutex<GuiState>>;
 pub(crate) fn show_or_focus(
     shared: GuiShared,
     snapshot: SharedSnapshot,
-    redial_tx: Sender<()>,
-    setmode_tx: Sender<NetMode>,
+    command_tx: CommandSender,
 ) {
     let mut state = match shared.lock() {
         Ok(g) => g,
@@ -112,7 +111,7 @@ pub(crate) fn show_or_focus(
         .spawn(move || {
             // panic 也是退出路径：catch 住后同样落 Dead，绝不把 Starting 留下。
             let result = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                run_window(Arc::clone(&shared2), snapshot, redial_tx, setmode_tx)
+                run_window(Arc::clone(&shared2), snapshot, command_tx)
             })) {
                 Ok(r) => r,
                 Err(_) => Err(anyhow::anyhow!("GUI thread panicked")),
@@ -140,8 +139,7 @@ pub(crate) fn show_or_focus(
 fn run_window(
     shared: GuiShared,
     snapshot: SharedSnapshot,
-    redial_tx: Sender<()>,
-    setmode_tx: Sender<NetMode>,
+    command_tx: CommandSender,
 ) -> anyhow::Result<()> {
     let mut options = NativeOptions {
         viewport: ViewportBuilder::default()
@@ -174,8 +172,7 @@ fn run_window(
             }
             Ok(Box::new(Gui {
                 snapshot,
-                redial_tx,
-                setmode_tx,
+                command_tx,
                 student_id: load_student_id(),
                 cfg_mtime: config_mtime(),
                 font_ok,
@@ -248,8 +245,7 @@ fn config_mtime() -> Option<std::time::SystemTime> {
 
 struct Gui {
     snapshot: SharedSnapshot,
-    redial_tx: Sender<()>,
-    setmode_tx: Sender<NetMode>,
+    command_tx: CommandSender,
     /// 卡面学号（R4：配置 mtime 变化时重读）。
     student_id: Option<String>,
     cfg_mtime: Option<std::time::SystemTime>,
@@ -312,9 +308,7 @@ impl eframe::App for Gui {
                     egui::ScrollArea::vertical()
                         .auto_shrink([false, false])
                         .show(ui, |ui| match snap.as_ref() {
-                            Some(s) => {
-                                receipt(ui, s, &view, &self.redial_tx, &self.setmode_tx, body_h)
-                            }
+                            Some(s) => receipt(ui, s, &view, &self.command_tx, body_h),
                             None => service_down(ui, &view),
                         });
                 });
@@ -488,8 +482,7 @@ fn receipt(
     ui: &mut egui::Ui,
     s: &StateSnapshot,
     view: &StampView,
-    redial_tx: &Sender<()>,
-    setmode_tx: &Sender<NetMode>,
+    command_tx: &CommandSender,
     body_h: f32,
 ) {
     ui.spacing_mut().item_spacing.y = 2.0;
@@ -507,10 +500,10 @@ fn receipt(
         dashed_rule(ui);
         ui.add_space(8.0);
         if primary_button(ui, "立即重拨").clicked() {
-            let _ = redial_tx.send(());
+            command_tx.send(Command::Redial);
         }
         ui.add_space(6.0);
-        mode_radios(ui, s.mode, setmode_tx);
+        mode_radios(ui, s.mode, command_tx);
         ui.add_space(8.0);
         dashed_rule(ui);
         ui.add_space(6.0);
@@ -727,7 +720,7 @@ fn primary_button(ui: &mut egui::Ui, label: &str) -> egui::Response {
 }
 
 /// 模式单选（卡蓝圆点）。
-fn mode_radios(ui: &mut egui::Ui, mode: NetMode, setmode_tx: &Sender<NetMode>) {
+fn mode_radios(ui: &mut egui::Ui, mode: NetMode, command_tx: &CommandSender) {
     ui.scope(|ui| {
         let v = ui.visuals_mut();
         v.widgets.inactive.fg_stroke = egui::Stroke::new(1.0, CARD_BLUE);
@@ -744,7 +737,9 @@ fn mode_radios(ui: &mut egui::Ui, mode: NetMode, setmode_tx: &Sender<NetMode>) {
                 )
                 .clicked()
             {
-                let _ = setmode_tx.send(NetMode::WiredExclusive);
+                command_tx.send(Command::SetMode {
+                    mode: NetMode::WiredExclusive,
+                });
             }
             if ui
                 .radio(
@@ -753,7 +748,9 @@ fn mode_radios(ui: &mut egui::Ui, mode: NetMode, setmode_tx: &Sender<NetMode>) {
                 )
                 .clicked()
             {
-                let _ = setmode_tx.send(NetMode::WiredPlusStandby);
+                command_tx.send(Command::SetMode {
+                    mode: NetMode::WiredPlusStandby,
+                });
             }
         });
     });

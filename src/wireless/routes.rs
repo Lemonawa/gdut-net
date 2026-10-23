@@ -6,7 +6,7 @@ use std::net::Ipv4Addr;
 use anyhow::{anyhow, Result};
 
 use crate::wireless::egress::EgressOps;
-use windows::Win32::Foundation::{ERROR_NOT_FOUND, ERROR_SUCCESS};
+use windows::Win32::Foundation::{ERROR_NOT_FOUND, ERROR_OBJECT_ALREADY_EXISTS, ERROR_SUCCESS};
 use windows::Win32::NetworkManagement::IpHelper::{
     CreateIpForwardEntry2, DeleteIpForwardEntry2, GetIpForwardTable2, GetIpInterfaceEntry,
     InitializeIpForwardEntry, InitializeIpInterfaceEntry, SetIpInterfaceEntry, IP_ADDRESS_PREFIX,
@@ -50,7 +50,7 @@ fn forward_row(dest: Ipv4Addr, gw: Ipv4Addr, ifindex: u32) -> MIB_IPFORWARD_ROW2
 fn add(dest: Ipv4Addr, gw: Ipv4Addr, ifindex: u32) -> Result<()> {
     let row = forward_row(dest, gw, ifindex);
     let err = unsafe { CreateIpForwardEntry2(&row) };
-    if err != ERROR_SUCCESS {
+    if err != ERROR_SUCCESS && err != ERROR_OBJECT_ALREADY_EXISTS {
         return Err(anyhow!("CreateIpForwardEntry2({dest}) failed: {}", err.0));
     }
     Ok(())
@@ -102,36 +102,19 @@ impl RouteGuard {
     /// 以 (dest, gw, ifindex) 三元组记账：WLAN 重连换 ifindex/网关（真机观察
     /// 15→16）时，旧元组不得短路新路径的添加——先删旧路径再按新路径重加。
     pub fn ensure(&mut self, dests: &[Ipv4Addr], gw: Ipv4Addr, ifindex: u32) {
-        for d in dests {
-            let want = (*d, gw, ifindex);
-            if self.added.contains(&want) {
-                continue;
-            }
-            self.added.retain(|(x, g, i)| {
-                if *x == *d {
-                    if let Err(e) = del(*x, *g, *i) {
-                        log::warn!("RouteGuard del stale {x} via {g}@{i} failed: {e:#}");
-                    }
-                    false
-                } else {
-                    true
+        let wanted: Vec<_> = dests.iter().map(|d| (*d, gw, ifindex)).collect();
+        for (d, g, i) in self.added.clone() {
+            if !wanted.contains(&(d, g, i)) {
+                if let Err(e) = self.delete_route(d, g, i) {
+                    log::warn!("RouteGuard stale route cleanup failed: {e:#}");
                 }
-            });
-            match add(*d, gw, ifindex) {
-                Ok(()) => self.added.push(want),
-                Err(e) => log::warn!("RouteGuard add {d} failed (kept going): {e:#}"),
             }
         }
-        self.added.retain(|(d, g, i)| {
-            if dests.contains(d) {
-                true
-            } else {
-                if let Err(e) = del(*d, *g, *i) {
-                    log::warn!("RouteGuard del stale {d} failed: {e:#}");
-                }
-                false
+        for (d, g, i) in wanted {
+            if let Err(e) = self.add_route(d, g, i) {
+                log::warn!("RouteGuard add {d} failed: {e:#}");
             }
-        });
+        }
     }
 
     /// 幂等压制 WLAN 接口 metric 到 target（首次保存原值）；target==0 不动作。
@@ -167,52 +150,55 @@ impl RouteGuard {
         self.applied_metric_ifindex = Some(ifindex);
     }
 
-    fn restore_metric(&mut self) {
-        if let Some(&(ifindex, metric, auto)) = self.saved_metric.as_ref() {
-            if let Err(e) = set_metric(ifindex, metric) {
-                // 还原失败：保留 saved_metric（下次还原/teardown 重试）并清
-                // applied 标志，让下一个 standby 拍重新压制而非永久短路
-                // （回滚铁律：失败不吞状态）。
-                log::warn!(
-                    "RouteGuard restore metric if{ifindex} -> {metric} failed (kept for retry): {e:#}"
-                );
-                self.applied_metric_ifindex = None;
-                return;
-            }
-            self.saved_metric = None;
-            log::info!("RouteGuard restored metric if{ifindex} -> {metric}");
-            // UseAutomaticMetric 还原（auto 时交还系统）
-            if auto {
-                let mut row = MIB_IPINTERFACE_ROW::default();
-                unsafe { InitializeIpInterfaceEntry(&mut row) };
-                row.Family = AF_INET;
-                row.InterfaceIndex = ifindex;
-                if unsafe { GetIpInterfaceEntry(&mut row) } == ERROR_SUCCESS {
-                    row.SitePrefixLength = 0;
-                    row.UseAutomaticMetric = true;
-                    unsafe {
-                        let _ = SetIpInterfaceEntry(&mut row);
-                    }
-                }
-            }
-        }
+    fn restore_metric(&mut self) -> Result<()> {
+        let Some((ifindex, metric, auto)) = self.saved_metric else {
+            self.applied_metric_ifindex = None;
+            return Ok(());
+        };
+        // Either part failing keeps the original state for the next cleanup.
         self.applied_metric_ifindex = None;
+        set_metric(ifindex, metric)?;
+        if auto {
+            let mut row = MIB_IPINTERFACE_ROW::default();
+            unsafe { InitializeIpInterfaceEntry(&mut row) };
+            row.Family = AF_INET;
+            row.InterfaceIndex = ifindex;
+            let read = unsafe { GetIpInterfaceEntry(&mut row) };
+            anyhow::ensure!(
+                read == ERROR_SUCCESS,
+                "Read automatic metric if{ifindex} failed: {}",
+                read.0
+            );
+            row.SitePrefixLength = 0;
+            row.UseAutomaticMetric = true;
+            let write = unsafe { SetIpInterfaceEntry(&mut row) };
+            anyhow::ensure!(
+                write == ERROR_SUCCESS,
+                "Restore automatic metric if{ifindex} failed: {}",
+                write.0
+            );
+        }
+        self.saved_metric = None;
+        log::info!("RouteGuard restored metric if{ifindex} -> {metric}");
+        Ok(())
     }
 
     /// 只还原 metric，不动路由：exclusive 模式让位瞬间（有线恢复、WLAN 仍短暂在线）
     /// 路由是否保留由后续 ensure/teardown 决定，此处仅解除接口压制。
-    pub fn release_metric(&mut self) {
-        self.restore_metric();
+    pub fn release_metric(&mut self) -> Result<()> {
+        self.restore_metric()
     }
 
     /// 全量回滚：删已加路由 + 还原 metric。teardown 后 Guard 可复用。
     pub fn teardown(&mut self) {
-        for (d, g, i) in self.added.drain(..) {
-            if let Err(e) = del(d, g, i) {
-                log::warn!("RouteGuard teardown {d} failed: {e:#}");
+        for (d, g, i) in self.added.clone() {
+            if let Err(e) = self.delete_route(d, g, i) {
+                log::warn!("RouteGuard teardown {d} failed (kept for retry): {e:#}");
             }
         }
-        self.restore_metric();
+        if let Err(e) = self.restore_metric() {
+            log::warn!("RouteGuard metric restore failed (kept for retry): {e:#}");
+        }
     }
 }
 
@@ -225,24 +211,27 @@ impl Drop for RouteGuard {
 }
 
 impl EgressOps for RouteGuard {
-    fn add_route(&mut self, dest: Ipv4Addr, gateway: Ipv4Addr, ifindex: u32) {
-        if add(dest, gateway, ifindex).is_err() {
-            log::warn!("Wireless Egress add {dest} failed (kept going)");
+    fn add_route(&mut self, dest: Ipv4Addr, gateway: Ipv4Addr, ifindex: u32) -> Result<()> {
+        let entry = (dest, gateway, ifindex);
+        if !self.added.contains(&entry) {
+            add(dest, gateway, ifindex)?;
+            self.added.push(entry);
         }
+        Ok(())
     }
 
-    fn delete_route(&mut self, dest: Ipv4Addr, gateway: Ipv4Addr, ifindex: u32) {
-        if del(dest, gateway, ifindex).is_err() {
-            log::warn!("Wireless Egress delete {dest} failed (kept going)");
-        }
+    fn delete_route(&mut self, dest: Ipv4Addr, gateway: Ipv4Addr, ifindex: u32) -> Result<()> {
+        del(dest, gateway, ifindex)?;
+        self.added.retain(|row| *row != (dest, gateway, ifindex));
+        Ok(())
     }
 
     fn suppress_metric(&mut self, ifindex: u32, target: u32) {
         self.set_standby_metric(ifindex, target);
     }
 
-    fn restore_metric(&mut self, _ifindex: u32) {
-        self.release_metric();
+    fn restore_metric(&mut self, _ifindex: u32) -> Result<()> {
+        self.release_metric()
     }
 }
 

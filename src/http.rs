@@ -1,7 +1,7 @@
 //! HTTP/1.0 GET 原语的唯一实现：源地址绑定是 interface 参数。
 //!
 //! cfg-free：URL / 状态行 / 认证跳转的纯解析（Linux TDD）；
-//! cfg(windows)：`get`（socket2 绑源、超时、字节上限）与 `get_async`。
+//! `get` / `get_async`：源地址绑定、整体截止时间与字节上限；异步取消关闭 socket。
 //! 语义与既有调用点一致：HTTP/1.0、不跟随重定向、Connection: close。
 
 /// 解析目标：`http://host[:port][/path]`。
@@ -60,7 +60,7 @@ pub fn is_auth_redirect(location_lower: &str) -> bool {
 }
 
 /// 读结束后的取舍：Complete 政策任何读错误都算失败；AcceptPartial 在已有字节时接受
-/// （探针只需要状态行 + Location；服务器/中间盒 RST 或超时不应丢弃已收到的应答）。
+/// （探针收到完整状态行与响应头后即结束；不接受被截断的 Location）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReadPolicy {
     Complete,
@@ -72,11 +72,10 @@ pub fn read_acceptable(policy: ReadPolicy, read_ok: bool, got_bytes: bool) -> bo
     read_ok || (policy == ReadPolicy::AcceptPartial && got_bytes)
 }
 
-#[cfg(windows)]
-mod win {
+mod transport {
     use std::io::{Read, Write};
     use std::net::{Ipv4Addr, SocketAddr, TcpStream};
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
 
     use anyhow::{anyhow, Context, Result};
     use socket2::{Domain, Protocol, Socket, Type};
@@ -100,58 +99,104 @@ mod win {
         pub body: String,
     }
 
-    /// 同步 GET：socket2 绑源 IP、connect/read/write 用同一 timeout、读上限 max_bytes。
-    /// 读结束时按 `req.read_policy` 取舍：AcceptPartial 在已有字节时接受读错误。
-    pub fn get(req: &Request<'_>) -> Result<Response> {
-        let target = parse_url(req.url).ok_or_else(|| anyhow!("Unsupported URL (http only)"))?;
-        let addr: SocketAddr = format!("{}:{}", target.host, target.port)
+    fn target_address(url: &str) -> Result<(super::Target, SocketAddr)> {
+        let target = parse_url(url).ok_or_else(|| anyhow!("Unsupported URL (http only)"))?;
+        let addr = format!("{}:{}", target.host, target.port)
             .parse()
             .with_context(|| format!("Bad host in URL: {}", target.host))?;
-        let socket = Socket::new(Domain::IPV4, Type::STREAM, Some(Protocol::TCP))?;
-        socket.bind(&SocketAddr::from((req.bind_ip, 0)).into())?;
-        socket.set_read_timeout(Some(req.timeout))?;
-        socket.set_write_timeout(Some(req.timeout))?;
-        socket
-            .connect_timeout(&addr.into(), req.timeout)
-            .with_context(|| format!("connect {addr} failed"))?;
-        let mut stream = TcpStream::from(socket);
-        let request = format!(
+        Ok((target, addr))
+    }
+
+    fn request_bytes(target: &super::Target, user_agent: &str) -> Vec<u8> {
+        format!(
             "GET {} HTTP/1.0\r\nHost: {}\r\nUser-Agent: {}\r\nConnection: close\r\n\r\n",
-            target.path, target.host_header, req.user_agent
-        );
-        stream.write_all(request.as_bytes())?;
-        let mut buf = Vec::new();
-        if let Err(e) = stream.take(req.max_bytes).read_to_end(&mut buf) {
-            if !read_acceptable(req.read_policy, false, !buf.is_empty()) {
-                return Err(e).context("read response failed");
-            }
-        }
-        let text = String::from_utf8_lossy(&buf);
-        let status = parse_status_code(text.split("\r\n").next().unwrap_or_default())
+            target.path, target.host_header, user_agent
+        )
+        .into_bytes()
+    }
+
+    fn remaining(deadline: Instant) -> std::io::Result<Duration> {
+        deadline
+            .checked_duration_since(Instant::now())
+            .filter(|d| !d.is_zero())
+            .ok_or_else(|| {
+                std::io::Error::new(std::io::ErrorKind::TimedOut, "HTTP deadline exceeded")
+            })
+    }
+
+    fn response(buf: &[u8]) -> Result<Response> {
+        let text = String::from_utf8_lossy(buf);
+        let (headers, body) = text
+            .split_once("\r\n\r\n")
+            .ok_or_else(|| anyhow!("Incomplete HTTP response headers"))?;
+        let status = parse_status_code(headers.split("\r\n").next().unwrap_or_default())
             .ok_or_else(|| anyhow!("Malformed HTTP status line"))?;
-        let location_lower = text
+        let location_lower = headers
             .split("\r\n")
             .skip(1)
-            .take_while(|l| !l.is_empty())
-            .find_map(|l| {
-                let (k, v) = l.split_once(':')?;
-                k.trim()
+            .find_map(|line| {
+                let (key, value) = line.split_once(':')?;
+                key.trim()
                     .eq_ignore_ascii_case("location")
-                    .then(|| v.trim().to_ascii_lowercase())
+                    .then(|| value.trim().to_ascii_lowercase())
             })
-            .unwrap_or_default();
-        let body = text
-            .split_once("\r\n\r\n")
-            .map(|(_, b)| b.to_string())
             .unwrap_or_default();
         Ok(Response {
             status,
             location_lower,
-            body,
+            body: body.to_string(),
         })
     }
 
-    /// async 适配：`spawn_blocking` 包同步实现；panic 视为错误。
+    fn headers_complete(buf: &[u8]) -> bool {
+        buf.windows(4).any(|bytes| bytes == b"\r\n\r\n")
+    }
+
+    /// Synchronous transport: every I/O uses the remaining whole-request budget.
+    pub fn get(req: &Request<'_>) -> Result<Response> {
+        let deadline = Instant::now() + req.timeout;
+        let (target, addr) = target_address(req.url)?;
+        let socket = Socket::new(Domain::IPV4, Type::STREAM, Some(Protocol::TCP))?;
+        socket.bind(&SocketAddr::from((req.bind_ip, 0)).into())?;
+        socket.connect_timeout(&addr.into(), remaining(deadline)?)?;
+        let mut stream = TcpStream::from(socket);
+        let request = request_bytes(&target, req.user_agent);
+        let mut written = 0;
+        while written < request.len() {
+            stream.set_write_timeout(Some(remaining(deadline)?))?;
+            let n = stream.write(&request[written..])?;
+            if n == 0 {
+                return Err(anyhow!("HTTP write returned zero"));
+            }
+            written += n;
+        }
+        let mut buf = Vec::new();
+        while (buf.len() as u64) < req.max_bytes {
+            let mut chunk = [0u8; 4096];
+            let limit = (req.max_bytes - buf.len() as u64).min(chunk.len() as u64) as usize;
+            let read = remaining(deadline).and_then(|budget| {
+                stream.set_read_timeout(Some(budget))?;
+                stream.read(&mut chunk[..limit])
+            });
+            match read {
+                Ok(0) => break,
+                Ok(n) => buf.extend_from_slice(&chunk[..n]),
+                Err(e) => {
+                    if !read_acceptable(req.read_policy, false, !buf.is_empty()) {
+                        return Err(e).context("read response failed");
+                    }
+                    break;
+                }
+            }
+            // Probes need only status + Location, never the response body.
+            if req.read_policy == ReadPolicy::AcceptPartial && headers_complete(&buf) {
+                break;
+            }
+        }
+        response(&buf)
+    }
+
+    /// Native async transport: dropping this future closes its socket immediately.
     pub async fn get_async(
         url: String,
         bind_ip: Ipv4Addr,
@@ -160,20 +205,40 @@ mod win {
         max_bytes: u64,
         read_policy: ReadPolicy,
     ) -> Result<Response> {
-        tokio::task::spawn_blocking(move || {
-            get(&Request {
-                url: &url,
-                bind_ip,
-                user_agent,
-                timeout,
-                max_bytes,
-                read_policy,
-            })
-        })
-        .await
-        .map_err(|e| anyhow!("http task panicked: {e}"))?
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let deadline = tokio::time::Instant::now() + timeout;
+        let io = async {
+            let (target, addr) = target_address(&url)?;
+            let socket = tokio::net::TcpSocket::new_v4()?;
+            socket.bind(SocketAddr::from((bind_ip, 0)))?;
+            let mut stream = socket.connect(addr).await?;
+            stream
+                .write_all(&request_bytes(&target, user_agent))
+                .await?;
+            let mut buf = Vec::new();
+            while (buf.len() as u64) < max_bytes {
+                let mut chunk = [0u8; 4096];
+                let limit = (max_bytes - buf.len() as u64).min(chunk.len() as u64) as usize;
+                match stream.read(&mut chunk[..limit]).await {
+                    Ok(0) => break,
+                    Ok(n) => buf.extend_from_slice(&chunk[..n]),
+                    Err(e) => {
+                        if !read_acceptable(read_policy, false, !buf.is_empty()) {
+                            return Err(e).context("read response failed");
+                        }
+                        break;
+                    }
+                }
+                if read_policy == ReadPolicy::AcceptPartial && headers_complete(&buf) {
+                    break;
+                }
+            }
+            response(&buf)
+        };
+        tokio::time::timeout_at(deadline, io)
+            .await
+            .map_err(|_| anyhow!("HTTP request deadline exceeded"))?
     }
 }
 
-#[cfg(windows)]
-pub use win::{get, get_async, Request, Response};
+pub use transport::{get, get_async, Request, Response};

@@ -54,3 +54,142 @@ fn read_policy_decides_partial_reads() {
     assert!(read_acceptable(ReadPolicy::AcceptPartial, true, false));
     assert!(read_acceptable(ReadPolicy::AcceptPartial, true, true));
 }
+
+use gdut_net::http::{get, get_async, Request};
+use std::io::{Read, Write};
+use std::net::{Ipv4Addr, TcpListener, TcpStream};
+use std::time::{Duration, Instant};
+
+fn serve(
+    handler: impl FnOnce(TcpStream) + Send + 'static,
+) -> (String, std::thread::JoinHandle<()>) {
+    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+    let address = listener.local_addr().unwrap();
+    let handle = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        let mut request = Vec::new();
+        let mut byte = [0u8; 1];
+        while !request.ends_with(b"\r\n\r\n") {
+            stream.read_exact(&mut byte).unwrap();
+            request.push(byte[0]);
+        }
+        handler(stream);
+    });
+    (format!("http://{address}/"), handle)
+}
+
+fn slow_body(mut stream: TcpStream) {
+    stream.write_all(b"HTTP/1.0 200 OK\r\n\r\n").unwrap();
+    // Every byte arrives well within the old per-read timeout.
+    for _ in 0..30 {
+        if stream.write_all(b"x").is_err() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(30));
+    }
+}
+
+#[test]
+fn synchronous_request_deadline_bounds_a_continuously_dripping_body() {
+    let (url, server) = serve(slow_body);
+    let started = Instant::now();
+    let result = get(&Request {
+        url: &url,
+        bind_ip: Ipv4Addr::LOCALHOST,
+        user_agent: "test",
+        timeout: Duration::from_millis(180),
+        max_bytes: 65536,
+        read_policy: ReadPolicy::Complete,
+    });
+    assert!(result.is_err());
+    assert!(started.elapsed() < Duration::from_millis(700));
+    server.join().unwrap();
+}
+
+#[tokio::test]
+async fn asynchronous_request_deadline_bounds_a_continuously_dripping_body() {
+    let (url, server) = serve(slow_body);
+    let started = Instant::now();
+    let result = get_async(
+        url,
+        Ipv4Addr::LOCALHOST,
+        "test",
+        Duration::from_millis(180),
+        65536,
+        ReadPolicy::Complete,
+    )
+    .await;
+    assert!(result.is_err());
+    assert!(started.elapsed() < Duration::from_millis(700));
+    server.join().unwrap();
+}
+
+#[tokio::test]
+async fn cancelling_async_request_closes_the_actual_socket() {
+    let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
+    let (closed_tx, closed_rx) = tokio::sync::oneshot::channel();
+    let (url, server) = serve(move |mut stream| {
+        ready_tx.send(()).unwrap();
+        let mut byte = [0u8; 1];
+        let result = stream.read(&mut byte);
+        closed_tx.send(matches!(result, Ok(0))).unwrap();
+    });
+    let task = tokio::spawn(get_async(
+        url,
+        Ipv4Addr::LOCALHOST,
+        "test",
+        Duration::from_secs(10),
+        65536,
+        ReadPolicy::Complete,
+    ));
+    ready_rx.await.unwrap();
+    task.abort();
+    assert!(task.await.unwrap_err().is_cancelled());
+    assert!(tokio::time::timeout(Duration::from_secs(1), closed_rx)
+        .await
+        .unwrap()
+        .unwrap());
+    server.join().unwrap();
+}
+
+#[tokio::test]
+async fn probe_finishes_after_complete_headers_without_waiting_for_body() {
+    let (url, server) = serve(slow_body);
+    let started = Instant::now();
+    let response = get_async(
+        url,
+        Ipv4Addr::LOCALHOST,
+        "test",
+        Duration::from_secs(2),
+        16384,
+        ReadPolicy::AcceptPartial,
+    )
+    .await
+    .unwrap();
+    assert_eq!(response.status, 200);
+    assert!(started.elapsed() < Duration::from_millis(500));
+    server.join().unwrap();
+}
+
+#[tokio::test]
+async fn partial_auth_redirect_header_is_not_mistaken_for_alive() {
+    let (url, server) = serve(|mut stream| {
+        stream
+            .write_all(b"HTTP/1.0 302 Found\r\nLocation: http://portal")
+            .unwrap();
+    });
+    assert!(get_async(
+        url,
+        Ipv4Addr::LOCALHOST,
+        "test",
+        Duration::from_secs(1),
+        16384,
+        ReadPolicy::AcceptPartial
+    )
+    .await
+    .is_err());
+    server.join().unwrap();
+}

@@ -445,7 +445,7 @@ impl SetupApp {
                         // 回滚实情：只陈述真的发生过的事，不替回滚打包票。
                         match self.rollback.clone() {
                             Some(work::RollbackOutcome::Restored) => {
-                                ui.label("已自动回滚到安装前的状态。");
+                                ui.label("已恢复程序文件、配置、拨号凭据、托盘自启及开始菜单，并恢复服务注册。");
                             }
                             Some(work::RollbackOutcome::RestoredUnknown) => {
                                 ui.colored_label(

@@ -7,7 +7,7 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 
 use crate::service::{
-    self, capture_prev_service, install_with_rollback, rollback_install, Credential,
+    self, capture_prev_service, rollback_install, Credential,
     InstallRequest as ServiceInstallRequest, RollbackOutcome,
 };
 use crate::setup::{config_path, install_dir, work, SetupArgs};
@@ -70,18 +70,72 @@ pub fn run_install(_args: &SetupArgs, req: InstallRequest, mut reporter: impl In
         password,
     } = CoreInstallRequest::from(req);
     let prev = capture_prev_service();
-    let mut core_rollback = None;
-
+    // Validate every payload hash and capture all old bytes/credentials while
+    // the old service is still available. Bad packages must not take it down.
+    let prepared = (|| -> Result<_> {
+        anyhow::ensure!(
+            !matches!(prev, service::PrevService::Unknown),
+            "Cannot safely back up service state; retry when service status is available"
+        );
+        let mut entries = work::load_payload()?;
+        anyhow::ensure!(
+            entries.iter().any(|e| e.name == "gdut-net.exe"),
+            "Payload is missing gdut-net.exe"
+        );
+        let self_exe = std::env::current_exe()?;
+        let setup_dest = crate::paths::setup_exe();
+        let same_file = match (
+            std::fs::canonicalize(&self_exe),
+            std::fs::canonicalize(&setup_dest),
+        ) {
+            (Ok(a), Ok(b)) => a == b,
+            _ => false,
+        };
+        if !same_file {
+            anyhow::ensure!(
+                !entries
+                    .iter()
+                    .any(|e| e.name.eq_ignore_ascii_case("gdut-net-setup.exe")),
+                "Payload must not overwrite the installer"
+            );
+            entries.push(crate::payload::Entry {
+                name: "gdut-net-setup.exe".into(),
+                data: std::fs::read(&self_exe).context("Failed to read installer")?,
+            });
+        }
+        let dir = install_dir();
+        let files =
+            super::file_backup::FileBackup::capture(entries.iter().map(|e| dir.join(&e.name)))?;
+        let core = service::InstallBackup::capture(&config_path())?;
+        let shell = crate::shell::ShellInstallBackup::capture()?;
+        Ok((entries, files, core, shell))
+    })();
+    let (entries, files, core, shell) = match prepared {
+        Ok(prepared) => prepared,
+        Err(error) => {
+            reporter.report(InstallEvent::Done {
+                result: Err(error),
+                rollback: RollbackOutcome::NotNeeded,
+            });
+            return;
+        }
+    };
+    let mut files_changed = false;
+    let mut core_changed = false;
+    let mut stopped = false;
+    let mut shell_changed = false;
     let result: Result<()> = (|| {
         step(&mut reporter, work::STEP_STOP_SERVICE, "停止旧服务");
+        stopped = true;
         service::stop_service(Duration::from_secs(16))?;
         work::kill_tray();
         done(&mut reporter, work::STEP_STOP_SERVICE, "停止旧服务");
 
         step(&mut reporter, work::STEP_UNPACK, "解包文件");
         let dir = install_dir();
-        unpack_files(&dir).with_context(|| format!("Failed to unpack into {}", dir.display()))?;
-        copy_setup_into_install_dir()?;
+        files_changed = true;
+        unpack_files(&dir, &entries)
+            .with_context(|| format!("Failed to unpack into {}", dir.display()))?;
         done(&mut reporter, work::STEP_UNPACK, "解包文件");
 
         step(&mut reporter, work::STEP_INSTALL_CORE, "写入配置并注册服务");
@@ -89,19 +143,16 @@ pub fn run_install(_args: &SetupArgs, req: InstallRequest, mut reporter: impl In
             Some(p) => Credential::Plain(p),
             None => Credential::KeepExisting,
         };
-        if let Err(f) = install_with_rollback(
-            ServiceInstallRequest {
-                cfg_path: config_path(),
-                student_id: Some(student_id.clone()),
-                credential,
-                service_exe: crate::paths::install_exe(),
-                tray_exe: crate::paths::install_exe(),
-            },
-            &prev,
-        ) {
-            core_rollback = Some(f.rollback);
-            return Err(f.error);
-        }
+        // The outer transaction owns rollback. Do not restart the old service
+        // until its executable and config have both been restored.
+        core_changed = true;
+        service::install_core(ServiceInstallRequest {
+            cfg_path: config_path(),
+            student_id: Some(student_id.clone()),
+            credential,
+            service_exe: crate::paths::install_exe(),
+            tray_exe: crate::paths::install_exe(),
+        })?;
         done(&mut reporter, work::STEP_INSTALL_CORE, "写入配置并注册服务");
 
         step(
@@ -109,6 +160,7 @@ pub fn run_install(_args: &SetupArgs, req: InstallRequest, mut reporter: impl In
             work::STEP_SHELL_INTEGRATION,
             "创建开始菜单快捷方式",
         );
+        shell_changed = true;
         crate::shell::install_shell_integration(&dir, env!("CARGO_PKG_VERSION"))?;
         done(
             &mut reporter,
@@ -124,13 +176,39 @@ pub fn run_install(_args: &SetupArgs, req: InstallRequest, mut reporter: impl In
 
     let rollback = match result {
         Ok(()) => RollbackOutcome::NotNeeded,
-        Err(ref error) => match core_rollback {
-            Some(rollback) => rollback,
-            None => {
-                log::error!("Install failed (rolling back): {error:#}");
-                rollback_install(&prev, &config_path())
+        Err(ref error) if stopped => {
+            log::error!("Install failed (rolling back): {error:#}");
+            let mut failures = Vec::new();
+            // StartService can fail after partially starting the process.
+            if let Err(e) = service::stop_service(Duration::from_secs(16)) {
+                failures.push(format!("Failed to stop service for rollback: {e:#}"));
             }
-        },
+            if files_changed {
+                if let Err(e) = files.restore() {
+                    failures.push(format!("{e:#}"));
+                }
+            }
+            if core_changed {
+                if let Err(e) = core.restore() {
+                    failures.push(format!("{e:#}"));
+                }
+            }
+            let service_rollback = rollback_install(&prev, &config_path());
+            if let RollbackOutcome::Failed(ref e) = service_rollback {
+                failures.push(e.clone());
+            }
+            if shell_changed {
+                if let Err(e) = shell.restore() {
+                    failures.push(format!("{e:#}"));
+                }
+            }
+            if failures.is_empty() {
+                service_rollback
+            } else {
+                RollbackOutcome::Failed(failures.join("; "))
+            }
+        }
+        Err(_) => RollbackOutcome::NotNeeded,
     };
     reporter.report(InstallEvent::Done { result, rollback });
 }
@@ -149,29 +227,12 @@ fn done(reporter: &mut impl InstallReporter, key: &'static str, label: &str) {
     });
 }
 
-fn unpack_files(dir: &std::path::Path) -> Result<()> {
+fn unpack_files(dir: &std::path::Path, entries: &[crate::payload::Entry]) -> Result<()> {
     std::fs::create_dir_all(dir).with_context(|| format!("Failed to create {}", dir.display()))?;
-    for entry in work::load_payload()? {
+    for entry in entries {
         let dest = dir.join(&entry.name);
-        std::fs::write(&dest, &entry.data)
+        super::file_backup::replace_file(&dest, &entry.data)
             .with_context(|| format!("Failed to write {}", dest.display()))?;
-    }
-    Ok(())
-}
-
-fn copy_setup_into_install_dir() -> Result<()> {
-    let self_exe = std::env::current_exe()?;
-    let setup_dest = crate::paths::setup_exe();
-    let same_file = match (
-        std::fs::canonicalize(&self_exe),
-        std::fs::canonicalize(&setup_dest),
-    ) {
-        (Ok(a), Ok(b)) => a == b,
-        _ => false,
-    };
-    if !same_file {
-        std::fs::copy(&self_exe, &setup_dest)
-            .context("Failed to copy setup exe into install dir")?;
     }
     Ok(())
 }

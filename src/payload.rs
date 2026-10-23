@@ -87,7 +87,15 @@ pub fn unpack(exe: &[u8]) -> Result<Option<Vec<Entry>>> {
     }
     let toc = &exe[toc_offset..toc_end];
     let mut pos = 0usize;
-    let mut entries = Vec::with_capacity(count);
+    // Each nonempty-name entry needs at least 51 TOC bytes. Validate before
+    // trusting the footer as an allocation size (corruption must return Err).
+    if count > toc.len() / 51 {
+        bail!("payload entry count exceeds TOC capacity");
+    }
+    let mut entries = Vec::new();
+    entries
+        .try_reserve_exact(count)
+        .context("Failed to reserve payload entries")?;
     for _ in 0..count {
         if pos + 2 > toc.len() {
             bail!("payload TOC truncated");
