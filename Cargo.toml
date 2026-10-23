@@ -62,7 +62,8 @@ windows = { version = "0.62", features = [
 ] }
 windows-service = "0.8"
 tauri-winrt-notification = "0.8"
-tray-icon = "0.24"
+# Windows tray only; GTK/libxdo defaults pull in unused Linux dependencies.
+tray-icon = { version = "0.24", default-features = false }
 
 [profile.release]
 opt-level = "z"
