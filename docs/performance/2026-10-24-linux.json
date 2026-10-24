@@ -1,0 +1,118 @@
+{
+  "architecture": "x86_64",
+  "baseline_revision": "bc9a345",
+  "baseline_scope": "changed algorithms reproduced with current compiler and dependencies; not complete old/new executables",
+  "cases": [
+    {
+      "after": {
+        "max_ms": 0.07380700000000001,
+        "median_ms": 0.065622,
+        "min_ms": 0.059391,
+        "samples": 7
+      },
+      "before": {
+        "max_ms": 54.174344,
+        "median_ms": 49.780197,
+        "min_ms": 46.38429,
+        "samples": 7
+      },
+      "case": "ipc_fragmented_frame_60kib",
+      "fragment_bytes": 16,
+      "kind": "actual_decoders"
+    },
+    {
+      "after_accepted_bytes_before_rejection": 65536,
+      "after_rejected_at_input_bytes": 69632,
+      "before_buffered_bytes": 4194304,
+      "case": "ipc_unterminated_frame",
+      "configured_limit_bytes": 65536,
+      "kind": "actual_decoders_not_process_rss"
+    },
+    {
+      "after": {
+        "max_ms": 11.054596,
+        "median_ms": 10.636571,
+        "min_ms": 10.30691,
+        "samples": 30
+      },
+      "before": {
+        "max_ms": 12.038362000000001,
+        "median_ms": 10.696862999999999,
+        "min_ms": 1.543154,
+        "samples": 30
+      },
+      "case": "http_normal",
+      "kind": "real_loopback_tcp"
+    },
+    {
+      "after": {
+        "max_ms": 201.862008,
+        "median_ms": 201.423105,
+        "min_ms": 200.822531,
+        "samples": 5
+      },
+      "before": {
+        "max_ms": 1005.2512790000001,
+        "median_ms": 1005.0566430000001,
+        "min_ms": 1004.7387219999999,
+        "samples": 5
+      },
+      "case": "http_slow_body_total_deadline",
+      "kind": "real_loopback_tcp"
+    },
+    {
+      "after": {
+        "max_ms": 11.258549,
+        "median_ms": 1.529965,
+        "min_ms": 1.43011,
+        "samples": 5
+      },
+      "before": {
+        "max_ms": 1014.306841,
+        "median_ms": 1005.2313150000001,
+        "min_ms": 1004.900603,
+        "samples": 5
+      },
+      "case": "http_probe_headers_early_return",
+      "kind": "real_loopback_tcp"
+    },
+    {
+      "after": {
+        "all_response_headers_sent_before_cancel": true,
+        "observation_ms_after_cancel": 150,
+        "requests": 8,
+        "server_connections_still_active": 0
+      },
+      "before": {
+        "all_response_headers_sent_before_cancel": true,
+        "observation_ms_after_cancel": 150,
+        "requests": 8,
+        "server_connections_still_active": 8
+      },
+      "case": "cancelled_requests",
+      "kind": "real_loopback_tcp"
+    },
+    {
+      "after": {
+        "max_ms": 3001.466369,
+        "median_ms": 3001.4073080000003,
+        "min_ms": 3000.333666,
+        "samples": 3
+      },
+      "before": {
+        "max_ms": 4502.952305,
+        "median_ms": 4502.150526,
+        "min_ms": 4501.963584,
+        "samples": 3
+      },
+      "case": "probe_timeout_scheduling",
+      "http_model_ms": 3000,
+      "icmp_model_ms": 1500,
+      "kind": "timer_model_not_real_icmp"
+    }
+  ],
+  "current_logic": "workspace production HTTP/decoder",
+  "platform": "linux",
+  "measured_date": "2026-10-24",
+  "production_revision": "a96123e"
+}

@@ -1,0 +1,118 @@
+{
+  "architecture": "x86_64",
+  "baseline_revision": "bc9a345",
+  "baseline_scope": "changed algorithms reproduced with current compiler and dependencies; not complete old/new executables",
+  "cases": [
+    {
+      "after": {
+        "max_ms": 0.0732,
+        "median_ms": 0.048900000000000006,
+        "min_ms": 0.0475,
+        "samples": 7
+      },
+      "before": {
+        "max_ms": 22.9037,
+        "median_ms": 22.3506,
+        "min_ms": 22.264,
+        "samples": 7
+      },
+      "case": "ipc_fragmented_frame_60kib",
+      "fragment_bytes": 16,
+      "kind": "actual_decoders"
+    },
+    {
+      "after_accepted_bytes_before_rejection": 65536,
+      "after_rejected_at_input_bytes": 69632,
+      "before_buffered_bytes": 4194304,
+      "case": "ipc_unterminated_frame",
+      "configured_limit_bytes": 65536,
+      "kind": "actual_decoders_not_process_rss"
+    },
+    {
+      "after": {
+        "max_ms": 0.641,
+        "median_ms": 0.3878,
+        "min_ms": 0.3433,
+        "samples": 30
+      },
+      "before": {
+        "max_ms": 0.6159,
+        "median_ms": 0.3697,
+        "min_ms": 0.3459,
+        "samples": 30
+      },
+      "case": "http_normal",
+      "kind": "real_loopback_tcp"
+    },
+    {
+      "after": {
+        "max_ms": 202.5731,
+        "median_ms": 202.3515,
+        "min_ms": 202.08870000000002,
+        "samples": 5
+      },
+      "before": {
+        "max_ms": 1011.0923,
+        "median_ms": 1009.6242,
+        "min_ms": 1007.3842,
+        "samples": 5
+      },
+      "case": "http_slow_body_total_deadline",
+      "kind": "real_loopback_tcp"
+    },
+    {
+      "after": {
+        "max_ms": 0.703,
+        "median_ms": 0.5757,
+        "min_ms": 0.4691,
+        "samples": 5
+      },
+      "before": {
+        "max_ms": 1009.5619,
+        "median_ms": 1009.2327999999999,
+        "min_ms": 1008.1644999999999,
+        "samples": 5
+      },
+      "case": "http_probe_headers_early_return",
+      "kind": "real_loopback_tcp"
+    },
+    {
+      "after": {
+        "all_response_headers_sent_before_cancel": true,
+        "observation_ms_after_cancel": 150,
+        "requests": 8,
+        "server_connections_still_active": 0
+      },
+      "before": {
+        "all_response_headers_sent_before_cancel": true,
+        "observation_ms_after_cancel": 150,
+        "requests": 8,
+        "server_connections_still_active": 8
+      },
+      "case": "cancelled_requests",
+      "kind": "real_loopback_tcp"
+    },
+    {
+      "after": {
+        "max_ms": 3011.5004,
+        "median_ms": 3007.5654,
+        "min_ms": 3003.5204000000003,
+        "samples": 3
+      },
+      "before": {
+        "max_ms": 4517.2444000000005,
+        "median_ms": 4511.5891,
+        "min_ms": 4509.6428,
+        "samples": 3
+      },
+      "case": "probe_timeout_scheduling",
+      "http_model_ms": 3000,
+      "icmp_model_ms": 1500,
+      "kind": "timer_model_not_real_icmp"
+    }
+  ],
+  "current_logic": "workspace production HTTP/decoder",
+  "platform": "windows",
+  "measured_date": "2026-10-24",
+  "production_revision": "a96123e"
+}
