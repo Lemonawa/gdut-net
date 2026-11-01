@@ -117,6 +117,7 @@ setup 文件尾部追加 `[files][TOC][footer]` 的自定义容器：footer 24B�
 - **`MIB_*_TABLE2` 的定长 `[T; 1]` 字段不可索引**：>1 条记录即越界 panic（本机 ~100 条路由，manager 启动即死且 tokio 静默吞掉）。一律 `from_raw_parts(Table.as_ptr(), NumEntries)` 变长视图；同教训见 `WLAN_INTERFACE_INFO_LIST.InterfaceInfo`。
 - **事件唤醒不得驱动状态机**：快照推送等事件若让主循环顺带跑 `run_once`，退避 sleep 被 2s 一切碎（实测 7 分钟重拨 79 次、探针 30s→2s）。主循环用"绝对唤醒时刻 + 剩余时长"并只在计时到点/显式命令时跑状态机。
 - **eportal 回包语义**：`result:1`=成功；`result:0`+`ret_code:2`=该 IP 已在线（视为成功，别重试）；`result:0`+`ret_code:1`=密码错。按 `ret_code` 区分，勿匹配中文 msg。
+- **新计费周期首次 WLAN 登录**（2026-11-01）：不能只重试 `/portal/login`，也不能把“正在进入新计费周期”当成自动开通成功。校园 `http://10.0.3.2/a58.js` 与 `FUjr/gdut_network` 确认：先请求同源 `/eportal/portal/custom/operator?account=...&r=0`；仅 `code=1,result=fail` 时自动确认 `r=1`，确认必须 `code=1,result=ok`，等 4s 再登录。当前周期 `r=0` 返回 `ok`，不发确认。三个 HTTP 请求都绑同一 WLAN 源，单请求 8s、整条认证 32s 截止，取消即停；状态查询/确认异常不得盲目发 `r=1` 或密码。服务与无线体检共用流程。已通过模拟回归和真机只读 `r=0` 验证；本周期已由用户手动开启，真实跨周期 `r=1` 尚待验收。详见 `docs/network-diagnostics-2026-11-01.md`。
 - **绑源 SYN 偶发被丢**（校园 AC 对未认证 MAC 的限流，官方客户端同样受）：单次 socket 8s 超时（覆盖 Windows SYN 重传 1s/2s/4s），CLI 三连试，manager 侧 5/15/30 退避重试兜底。
 - **无线接管窗口实测**：拔线 → `Ethernet link down, dial paused` → portal 登录 ≈13s；插线 → 1.5s 拨上 → 10s 后 WLAN 让位，/32 清 0、metric 还原。
 - **mihomo 接口缓存 TTL 20s**（sing-tun `singledo.NewSingle(20s)`）：接口消失后旧绑定最长 20s 内自愈，无需重启内核。
@@ -170,6 +171,7 @@ setup 文件尾部追加 `[files][TOC][footer]` 的自定义容器：footer 24B�
 - `/mnt/c/ProgramData/**` 等受保护路径对 WSL 只读——改配置走程序自身（`install` 幂等重写 config）或 Windows 管理员侧。
 
 ### 代理 / Verge 排障
+- **2026-11-01 已部署 DNS 调整**：uDNS 广州 850/851 证书链校验失败；默认查询改经 `Final` 代理组使用 Cloudflare/Google DoH，节点域名单独用国内 DoH 防依赖环；腾讯/校内域名策略必须先于 `geosite:cn`（实测集合会抢匹配）。腾讯校内策略明确 `udp://10.1.3.38:53#disable-ipv6=true`。实际生产检查及系统缓存清理后，公共 A/AAAA、校园镜像、腾讯仅 IPv4 正常，`ProxyEnable=0`。完整记录与离线回退位置见 `docs/network-diagnostics-2026-11-01.md`。新计费周期确认补丁也已安装，真实跨周期分支待下次周期验收。
 - `ProxyEnable` 存 HKCU 重启不清零；是否翻回只看自启动项（`HKCU/HKLM\...\Run` 应无 FlClash/Verge/clash 系）。回写是事件驱动的（FlClash HelperService 定时写回，GUI 开关脱节）；深挖用注册表审计（中文系统 auditpol 子类别"注册表"）+ `Get-WinEvent ID=4657` 看进程名；历史定案是改 `Connections\gdut` blob（flags bit1）+ `MigrateProxy` 置 0，而非杀进程。
 - Verge 改 `Merge.yaml` 必须**完整退出并重启 Verge 进程**才重新合并；TUN GUI 弹窗保存则热生效（2.5.4 实测）。TUN 状态看 `Get-NetAdapter Mihomo` + `0.0.0.0/0` 路由在不在。
 - Google 类站点在 Chrome 里可能拿到 `alt-svc: h3` 后尝试 QUIC；2026-09-20 本机 TUN MTU=1480 时 TCP/H2 已恢复且 Google ≈0.5s，但 `curl --http3-only` 对 Google 仍超时（H3 握手能到 2.3s，后续无响应）。若浏览器偶发局部卡住，先在 `chrome://flags/#enable-quic` 禁用 QUIC，不要把 TCP 恢复误判成 MTU 未生效。

@@ -6,6 +6,8 @@
 
 ## 部署与基础功能
 
+新计费周期首次 WLAN 登录：服务先查询 `custom/operator`（`r=0`）；仅学校明确要求确认时提交一次 `r=1`，确认成功后等 4s 再认证。日志应出现 `billing cycle confirmation required` → `billing cycle confirmed` → `portal login success`；正常周期不应出现确认日志。当前周期已由用户手动开启，2026-11-01 仅验证只读查询与模拟 HTTP 回归，真实跨周期自动确认待下一周期验收。不得用正在使用的账号反复触发确认来伪造验收。
+
 ```powershell
 # 管理员 PowerShell，gdut-net.exe 所在目录
 .\gdut-net.exe install            # 输入密码（学号为空时也会提示输入学号）

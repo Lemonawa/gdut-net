@@ -995,7 +995,7 @@ fn every_effect_has_exactly_one_lane() {
         Effect::Settle(Duration::from_secs(3)),
         Effect::PortalAuth {
             src_ip: Ipv4Addr::new(10, 1, 1, 5),
-            timeout: Duration::from_secs(20),
+            timeout: gdut_net::wireless::portal::LOGIN_TIMEOUT,
         },
         Effect::WlanProbe {
             src_ip: Ipv4Addr::new(10, 1, 1, 5),
@@ -1143,7 +1143,7 @@ async fn ensure_routes_only_on_portal_auth() {
             Effect::Settle(Duration::from_secs(3)),
             Effect::PortalAuth {
                 src_ip: Ipv4Addr::new(10, 1, 1, 5),
-                timeout: Duration::from_secs(20),
+                timeout: gdut_net::wireless::portal::LOGIN_TIMEOUT,
             },
         ]
     );

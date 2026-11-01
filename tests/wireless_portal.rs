@@ -85,3 +85,39 @@ fn already_online_is_success_not_failure() {
         PortalResult::Failure("密码错误".into())
     );
 }
+
+#[test]
+fn billing_status_requires_an_explicit_supported_reply() {
+    for code in ["1", "\"1\""] {
+        assert_eq!(
+            parse_billing_reply(&format!(r#"dr1003({{"code":{code},"result":"ok"}});"#)),
+            BillingStatus::Ready
+        );
+        assert_eq!(
+            parse_billing_reply(&format!(r#"{{"code":{code},"result":"fail"}}"#)),
+            BillingStatus::ConfirmationRequired
+        );
+    }
+    assert_eq!(
+        parse_billing_reply(r#"{"code":"0","result":"fail"}"#),
+        BillingStatus::Rejected
+    );
+    for body in [
+        "<html>error</html>",
+        r#"{"result":"fail"}"#,
+        r#"{"code":"1","result":"unknown"}"#,
+    ] {
+        assert_eq!(parse_billing_reply(body), BillingStatus::Malformed);
+    }
+}
+
+#[test]
+fn billing_url_stays_on_configured_origin_and_encodes_account() {
+    let base = "http://10.0.3.2:801/eportal/portal/login";
+    let query = build_operator_url(base, "user&r=1", false).unwrap();
+    assert_eq!(query, "http://10.0.3.2:801/eportal/portal/custom/operator?callback=dr1003&account=user%26r%3D1&r=0&jsVersion=4.1.3&lang=en");
+    assert!(build_operator_url(base, "u", true)
+        .unwrap()
+        .contains("&r=1&"));
+    assert!(build_operator_url("http://10.0.3.2/other", "u", true).is_none());
+}

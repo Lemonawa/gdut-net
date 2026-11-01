@@ -392,12 +392,24 @@ mod win {
                         portal::redact_query(&url)
                     );
                     let attempt = async {
-                        // 挂死会话兜底：portal_get 卡死不能把 Brain 永久钉在
-                        // Authing——超时按认证失败回报（T4 carry-forward）。
-                        match tokio::time::timeout(timeout, portal::portal_get(src_ip, &url)).await
+                        match tokio::time::timeout(
+                            timeout,
+                            portal::login(
+                                src_ip,
+                                &self.portal_url,
+                                &self.user,
+                                &self.pass,
+                                &self.wlan_ac_ip,
+                            ),
+                        )
+                        .await
                         {
-                            Ok(Some((status, body))) => PortalAttempt::Replied { status, body },
-                            Ok(None) => PortalAttempt::NoReply,
+                            Ok(Ok((status, body))) => PortalAttempt::Replied { status, body },
+                            Ok(Err(error)) => {
+                                // login() exposes only fixed English diagnostics, never URLs/reply text.
+                                log::warn!("Wireless: portal authentication failed: {error}");
+                                PortalAttempt::Failed(error.to_string())
+                            }
                             Err(_) => PortalAttempt::TimedOut,
                         }
                     };

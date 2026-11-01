@@ -1,5 +1,5 @@
 //! `gdut-net wireless test`：现场验证 portal 常量（连 SSID → 等 IP → 临时 /32 →
-//! 一次 login → 打印回包 → 自回滚断开）。见 spec §10。
+//! query/confirm billing cycle if needed → login → 自回滚断开）。见 spec §10。
 
 use std::path::Path;
 use std::time::{Duration, Instant};
@@ -76,12 +76,20 @@ pub fn cli_test(cfg_path: &Path) -> Result<()> {
         let r = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()?
-            .block_on(portal::portal_get(adapter.ipv4, &url));
-        if r.is_some() {
-            reply = r;
-            break;
+            .block_on(portal::login(
+                adapter.ipv4,
+                &cfg.wireless.portal_url,
+                &cfg.account.student_id,
+                &pass,
+                &cfg.wireless.wlan_ac_ip,
+            ));
+        match r {
+            Ok(r) => {
+                reply = Some(r);
+                break;
+            }
+            Err(error) => println!("Authentication flow failed (attempt {attempt}/3): {error}"),
         }
-        println!("No reply (attempt {attempt}/3), retrying ...");
         std::thread::sleep(Duration::from_secs(2));
     }
     match reply {

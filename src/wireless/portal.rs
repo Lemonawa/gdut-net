@@ -1,7 +1,16 @@
-//! eportal 认证（纯逻辑）：URL 构建（percent-encode）与 JSONP 回包解析。
+//! eportal authentication: URL/reply logic plus source-bound, cancellable HTTP flow.
 //! 协议事实来自 lin-snow/GDUT-Login（2024 实证，大学城），常量见 ADR-0005。
+//! Billing gate: campus a58.js (2026-11-01), also documented by FUjr/gdut_network.
 
 use std::net::Ipv4Addr;
+use std::time::Duration;
+
+/// Query + optional confirmation + 4s portal settle + login, each request <= 8s.
+pub const LOGIN_TIMEOUT: Duration = Duration::from_secs(32);
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(8);
+const BILLING_SETTLE: Duration = Duration::from_secs(4);
+// Device slots are keyed partly by User-Agent; retain the established value.
+const PORTAL_UA: &str = "python-requests/2.31.0";
 
 /// percent-encode：非 unreserved（RFC 3986）一律 %XX（大写 hex）。
 pub fn urlencode(s: &str) -> String {
@@ -27,6 +36,110 @@ pub fn build_login_url(base: &str, user: &str, pass: &str, ip: Ipv4Addr, ac_ip: 
         urlencode(pass),
         urlencode(ac_ip),
     )
+}
+
+/// The school's a58.js uses r=0 to query, r=1 only after confirmation is required.
+/// Keep the configured login origin and port; never follow a response-supplied URL.
+pub fn build_operator_url(base: &str, user: &str, confirm: bool) -> Option<String> {
+    let parent = base.strip_suffix("/login")?;
+    Some(format!(
+        "{parent}/custom/operator?callback=dr1003&account={}&r={}&jsVersion=4.1.3&lang=en",
+        urlencode(user),
+        u8::from(confirm)
+    ))
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BillingStatus {
+    Ready,
+    ConfirmationRequired,
+    Rejected,
+    Malformed,
+}
+
+pub fn parse_billing_reply(body: &str) -> BillingStatus {
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(extract_json(body)) else {
+        return BillingStatus::Malformed;
+    };
+    match v.get("code") {
+        Some(code) if code.as_str() == Some("1") || code.as_u64() == Some(1) => {}
+        Some(_) => return BillingStatus::Rejected,
+        None => return BillingStatus::Malformed,
+    }
+    match v.get("result").and_then(|r| r.as_str()) {
+        Some("ok") => BillingStatus::Ready,
+        Some("fail") => BillingStatus::ConfirmationRequired,
+        _ => BillingStatus::Malformed,
+    }
+}
+
+/// GDUT authentication, including its first-Wi-Fi-login billing-cycle gate.
+/// All requests bind the same WLAN source and share the caller's cancellation.
+/// No passwords, account IDs, response messages, or query strings reach logs/errors.
+pub async fn login(
+    src_ip: Ipv4Addr,
+    base: &str,
+    user: &str,
+    pass: &str,
+    ac_ip: &str,
+) -> anyhow::Result<(u16, String)> {
+    tokio::time::timeout(LOGIN_TIMEOUT, login_inner(src_ip, base, user, pass, ac_ip))
+        .await
+        .map_err(|_| anyhow::anyhow!("Portal authentication deadline exceeded"))?
+}
+
+async fn login_inner(
+    src_ip: Ipv4Addr,
+    base: &str,
+    user: &str,
+    pass: &str,
+    ac_ip: &str,
+) -> anyhow::Result<(u16, String)> {
+    let query = build_operator_url(base, user, false)
+        .ok_or_else(|| anyhow::anyhow!("Portal login URL must end in /login"))?;
+    let status = billing_request(src_ip, query).await?;
+    match status {
+        BillingStatus::Ready => {}
+        BillingStatus::ConfirmationRequired => {
+            log::info!("Wireless: billing cycle confirmation required");
+            let confirm = build_operator_url(base, user, true)
+                .ok_or_else(|| anyhow::anyhow!("Portal login URL must end in /login"))?;
+            if billing_request(src_ip, confirm).await? != BillingStatus::Ready {
+                anyhow::bail!("Billing cycle confirmation rejected; login deferred");
+            }
+            log::info!("Wireless: billing cycle confirmed; waiting 4s before login");
+            tokio::time::sleep(BILLING_SETTLE).await;
+        }
+        BillingStatus::Rejected => anyhow::bail!("Billing cycle status query rejected"),
+        BillingStatus::Malformed => anyhow::bail!("Malformed billing cycle status reply"),
+    }
+    let url = build_login_url(base, user, pass, src_ip, ac_ip);
+    let response = request(src_ip, url)
+        .await
+        .map_err(|_| anyhow::anyhow!("Portal login request failed"))?;
+    Ok((response.status, response.body))
+}
+
+async fn request(src_ip: Ipv4Addr, url: String) -> anyhow::Result<crate::http::Response> {
+    crate::http::get_async(
+        url,
+        src_ip,
+        PORTAL_UA,
+        REQUEST_TIMEOUT,
+        64 * 1024,
+        crate::http::ReadPolicy::Complete,
+    )
+    .await
+}
+
+async fn billing_request(src_ip: Ipv4Addr, url: String) -> anyhow::Result<BillingStatus> {
+    let reply = request(src_ip, url)
+        .await
+        .map_err(|_| anyhow::anyhow!("Billing cycle request failed"))?;
+    if reply.status != 200 {
+        anyhow::bail!("Billing cycle request returned HTTP {}", reply.status);
+    }
+    Ok(parse_billing_reply(&reply.body))
 }
 
 /// 日志/事件用脱敏：query 整体打码（内含明文密码）。
@@ -88,35 +201,3 @@ fn extract_json(body: &str) -> &str {
         _ => body.trim(),
     }
 }
-
-#[cfg(windows)]
-mod win {
-    use std::net::Ipv4Addr;
-    use std::time::Duration;
-
-    // 8s：真机实测（2026-09-10）绑源 SYN 偶发被丢（30s 关联年龄下仍 t+34s
-    // 失败 / t+40s 成功），Windows SYN 重传 1s/2s/4s 三连，3s 会拦腰截断。
-    const TIMEOUT: Duration = Duration::from_secs(8);
-    const MAX_RESPONSE: u64 = 64 * 1024;
-    /// 与已实证脚本一致的 UA（requests 默认值）；设备计数按 MAC+UA（CONTEXT.md），别乱换。
-    const PORTAL_UA: &str = "python-requests/2.31.0";
-
-    /// eportal 登录 GET：任何 HTTP/网络失败（含超时）→ None，调用方按认证失败处理。
-    /// Complete：旧 portal 语义——任何读错误（即使已有字节）都判失败。
-    pub async fn portal_get(src_ip: Ipv4Addr, url: &str) -> Option<(u16, String)> {
-        crate::http::get_async(
-            url.to_string(),
-            src_ip,
-            PORTAL_UA,
-            TIMEOUT,
-            MAX_RESPONSE,
-            crate::http::ReadPolicy::Complete,
-        )
-        .await
-        .ok()
-        .map(|r| (r.status, r.body))
-    }
-}
-
-#[cfg(windows)]
-pub use win::portal_get;

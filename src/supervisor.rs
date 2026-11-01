@@ -33,8 +33,8 @@ const LINK_POLL_MS: u64 = 2_000;
 const WIRELESS_TICK_MS: u64 = 2_000;
 /// 采样结果缺席时的重试窗口：只推账本，绝不重发在飞效果（I11）。
 const SAMPLE_RETRY_MS: u64 = 2_000;
-/// eportal 单次认证墙钟上限（真机：绑源 SYN 偶发被丢 + SYN 重传，20s 兜底）。
-const PORTAL_AUTH_TIMEOUT: Duration = Duration::from_secs(20);
+/// Whole authentication flow, including the optional billing-cycle confirmation.
+const PORTAL_AUTH_TIMEOUT: Duration = portal::LOGIN_TIMEOUT;
 /// 连续重拨失败累计多久后弹 Toast。
 const REDIAL_FAILING_TOAST_AFTER_MS: u64 = 10 * 60 * 1000;
 
@@ -769,8 +769,20 @@ impl Supervisor {
         self.auth_in_flight = false;
         let (ok, msg) = portal_outcome(&attempt);
         if ok {
+            log::info!("Wireless: portal login success");
             self.events.push(wall, "Wireless: portal login success");
         } else {
+            // Portal text may echo credentials and is localized; keep it in the GUI only.
+            match &attempt {
+                PortalAttempt::Replied { status, .. } => {
+                    log::warn!("Wireless: portal login rejected or malformed (HTTP {status})");
+                }
+                PortalAttempt::NoReply => log::warn!("Wireless: portal login received no reply"),
+                PortalAttempt::TimedOut => log::warn!("Wireless: portal authentication timed out"),
+                PortalAttempt::Failed(_) => {
+                    log::warn!("Wireless: portal authentication flow failed")
+                }
+            }
             self.events
                 .push(wall, &format!("Wireless: portal login failed: {msg}"));
         }
