@@ -265,9 +265,9 @@ mod win {
                 },
             });
         }
-        // 拨号成功后收走 PPP 接口的 DNS：PPP 带 DNS 会让 Windows 对应用隐藏 AAAA
-        // （2026-09-23 实测，详见 adapter::detach_ppp_dns）。
-        crate::adapter::detach_ppp_dns(name);
+        // 保留 RAS 下发的 DNS。物理口有 DNS 不代表 Windows 会在 PPP 出口
+        // 使用它：2026-11-10 实测清空 PPP DNS 后，TUN 一关系统解析全部失败，
+        // 即使逐台直查校园 DNS 都正常。不能为恢复 AAAA 牺牲基本域名解析。
         Ok(RasSession { handle })
     }
 
