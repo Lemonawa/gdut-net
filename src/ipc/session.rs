@@ -93,6 +93,21 @@ mod win {
             Ok(())
         }
 
+        async fn set_mode_confirmed(&mut self, mode: NetMode) -> Result<StateSnapshot> {
+            tokio::time::timeout(Duration::from_secs(10), async {
+                self.next_snapshot().await?;
+                self.send(Command::SetMode { mode }).await?;
+                loop {
+                    let snapshot = self.next_snapshot().await?;
+                    if snapshot.mode == mode {
+                        return Ok(snapshot);
+                    }
+                }
+            })
+            .await
+            .context("Service did not confirm mode switch within 10 seconds")?
+        }
+
         /// 发送命令并读回确认快照：读帧直到谓词为真或读满 `max_frames` 帧。
         /// 谓词命中返回该帧；预算读满仍不命中返回最后一帧，由调用方判定
         /// 确认失败（传输错误原样上抛）。
@@ -161,20 +176,71 @@ mod win {
         session.next_snapshot()
     }
 
-    /// `wireless off/standby`：发 SetMode 并等回显（消费首帧 → 发 → ≤5 帧），
-    /// 确认失败返回与现状相同的错误文本。
+    /// 托盘和 CLI 共用：完成首帧握手，保持连接直到服务回显目标模式。
     pub fn set_mode_confirmed(mode: NetMode) -> Result<StateSnapshot> {
         let mut session = SyncSession::connect()?;
-        // 服务端连接即推一帧（命令前的 mode）：先消费，否则确认行会读到旧 mode。
-        session.next_snapshot()?;
-        // 之后的帧可能是主循环周期推送、仍带旧 mode；最多读 5 帧直到请求的
-        // mode 出现。
-        let snapshot =
-            session.send_and_confirm(Command::SetMode { mode }, |s| s.mode == mode, 5)?;
-        if snapshot.mode != mode {
-            bail!("Service did not confirm mode switch (check `status` output)");
+        session.rt.block_on(session.inner.set_mode_confirmed(mode))
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use tokio::io::{AsyncBufReadExt, BufReader};
+        use tokio::net::windows::named_pipe::ServerOptions;
+
+        #[tokio::test]
+        async fn mode_switch_waits_for_service_echo_in_both_directions() {
+            let name = format!(r"\\.\pipe\gdut-net-mode-test-{}", std::process::id());
+            let mut server = ServerOptions::new()
+                .first_pipe_instance(true)
+                .create(&name)
+                .unwrap();
+            let mut client = Session {
+                pipe: ClientOptions::new().open(&name).unwrap(),
+                decoder: FrameDecoder::default(),
+                buf: VecDeque::new(),
+            };
+            server.connect().await.unwrap();
+            let (done, finished) = tokio::sync::oneshot::channel();
+            let service = tokio::spawn(async move {
+                let mut state: StateSnapshot = serde_json::from_str(
+                    r#"{"status":"idle","heartbeat":"off","redial_attempts":0}"#,
+                )
+                .unwrap();
+                for mode in [NetMode::WiredPlusStandby, NetMode::WiredExclusive] {
+                    let old = encode_frame(&ServerMsg::State {
+                        state: state.clone(),
+                    });
+                    server.write_all(&old).await.unwrap();
+                    let mut command = String::new();
+                    BufReader::new(&mut server)
+                        .read_line(&mut command)
+                        .await
+                        .unwrap();
+                    assert_eq!(
+                        serde_json::from_str::<ClientMsg>(&command).unwrap(),
+                        ClientMsg::Cmd {
+                            c: Command::SetMode { mode }
+                        }
+                    );
+                    server.write_all(&old.repeat(6)).await.unwrap();
+                    state.mode = mode;
+                    server
+                        .write_all(&encode_frame(&ServerMsg::State {
+                            state: state.clone(),
+                        }))
+                        .await
+                        .unwrap();
+                }
+                // Keep the pipe open until the client has consumed the last echo.
+                finished.await.unwrap();
+            });
+            for mode in [NetMode::WiredPlusStandby, NetMode::WiredExclusive] {
+                assert_eq!(client.set_mode_confirmed(mode).await.unwrap().mode, mode);
+            }
+            done.send(()).unwrap();
+            service.await.unwrap();
         }
-        Ok(snapshot)
     }
 }
 

@@ -469,9 +469,18 @@ pub fn run_tray(show_gui_at_start: bool) -> Result<()> {
 /// Runs only on the command worker. Connection retries never hold the UI pump.
 fn send_cmd_logged(cmd: Command) {
     let what = format!("{cmd:?}");
-    let result = SyncSession::connect().and_then(|mut session| session.send(cmd));
+    let result = match cmd {
+        Command::SetMode { mode } => crate::ipc::session::set_mode_confirmed(mode).map(|_| ()),
+        Command::Redial => {
+            SyncSession::connect().and_then(|mut session| session.send(Command::Redial))
+        }
+    };
     if let Err(e) = result {
         log::warn!("Failed to send {what} command: {e:#}");
+        if matches!(cmd, Command::SetMode { .. }) {
+            let _ =
+                crate::notify::toast("网络模式切换未确认", "请查看当前模式，或打开日志查看原因。");
+        }
     }
 }
 
