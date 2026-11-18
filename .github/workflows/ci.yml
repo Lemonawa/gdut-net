@@ -12,11 +12,11 @@ jobs:
   linux-test:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@v7.0.1
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@v2.9.3
       - run: cargo test
       - run: cargo clippy -- -D warnings
       - run: cargo fmt --check
@@ -24,17 +24,17 @@ jobs:
   windows-build:
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@v7.0.1
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@v2.9.3
       - run: cargo test --release
       - run: cargo clippy --all-targets -- -D warnings
       - run: cargo build --release
       - run: ./target/release/gdut-net-pack.exe --setup target/release/gdut-net-setup.exe --file target/release/gdut-net.exe --payload-dir packaging/payload --out gdut-net-setup.exe
         shell: pwsh
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@v7.0.2
         with:
           name: gdut-net-setup
           path: gdut-net-setup.exe

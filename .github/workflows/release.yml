@@ -14,15 +14,15 @@ jobs:
   build:
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@v7.0.1
       - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@v2.9.3
       - run: cargo test --release
       - run: cargo clippy --all-targets -- -D warnings
       - run: cargo build --release
       - run: ./target/release/gdut-net-pack.exe --setup target/release/gdut-net-setup.exe --file target/release/gdut-net.exe --payload-dir packaging/payload --out gdut-net-setup.exe
         shell: pwsh
-      - uses: softprops/action-gh-release@v3
+      - uses: softprops/action-gh-release@v3.0.4
         with:
           files: gdut-net-setup.exe
           generate_release_notes: true

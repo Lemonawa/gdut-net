@@ -37,7 +37,7 @@ sha2 = "0.11"
 tempfile = "3"
 
 [target.'cfg(windows)'.dependencies]
-eframe = { version = "0.36", default-features = false, features = ["glow", "default_fonts"] }
+eframe = { version = "0.37", default-features = false, features = ["glow", "default_fonts", "clipboard"] }
 winit = { version = "0.30", default-features = false }
 windows = { version = "0.62", features = [
   "Win32_Foundation",
@@ -63,7 +63,7 @@ windows = { version = "0.62", features = [
 windows-service = "0.8"
 tauri-winrt-notification = "0.8"
 # Windows tray only; GTK/libxdo defaults pull in unused Linux dependencies.
-tray-icon = { version = "0.24", default-features = false }
+tray-icon = { version = "0.26", default-features = false }
 
 [profile.release]
 opt-level = "z"
